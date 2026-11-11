@@ -1,0 +1,16 @@
+# ---- 实例专属配置：仅保留说明文件 ----
+/private/
+
+# ---- 防误提交的敏感文件 ----
+.env
+*.env
+!examples/env.example
+*.pem
+*.key
+*.crt
+*.p12
+
+# ---- 生成物 / 临时文件 ----
+/out/
+*.log
+.DS_Store

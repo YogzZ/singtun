@@ -1,0 +1,140 @@
+# mihomo (Clash.Meta) 远程订阅配置 (由 ssctl 50-gen-clients.sh 生成)
+# 策略：绕过中国大陆与私有网络，海外域名经代理远端 DoH 解析防泄漏，拒绝非大陆 UDP 443 (QUIC)
+
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: warning
+unified-delay: true
+tcp-concurrent: true
+find-process-mode: off
+# 顶层保持 ipv6: true 使 TUN 接管宿主原生 IPv6 路由；当 SERVER_IPV6=false 时通过 dns.ipv6: false 与 IP-CIDR6 REJECT 本地阻断防旁路
+ipv6: true
+
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+sniffer:
+  enable: true
+  parse-pure-ip: true
+  sniff:
+    HTTP:
+      ports: [80, 8080-8880]
+      override-destination: true
+    TLS:
+      ports: [443, 8443]
+    QUIC:
+      ports: [443, 8443]
+  skip-domain:
+    - "Mijia Cloud"
+    - "+.push.apple.com"
+    - "+.local"
+
+tun:
+  enable: true
+  stack: mixed
+  auto-route: true
+  strict-route: true
+  auto-detect-interface: true
+  inet6-address:
+    - fdfe:dcba:9876::1/126
+  dns-hijack:
+    - any:53
+    - tcp://any:53
+
+dns:
+  enable: true
+  ipv6: __IPV6_BOOL__
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - "+.lan"
+    - "+.local"
+    - "+.arpa"
+    - "localhost.ptlogin2.qq.com"
+    - "localhost.sec.qq.com"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+    - "connectivitycheck.gstatic.com"
+    - "captive.apple.com"
+    - "+.ls.apple.com"
+    - "time.*.com"
+    - "time.*.gov"
+    - "time.*.edu.cn"
+    - "time.*.apple.com"
+    - "ntp.*.com"
+    - "+.pool.ntp.org"
+    - "__SERVER_DOMAIN__"
+  default-nameserver:
+    - "https://__DNS_DIRECT__/dns-query"
+  proxy-server-nameserver:
+    - "https://__DNS_DIRECT__/dns-query"
+  direct-nameserver:
+    - "https://__DNS_DIRECT__/dns-query"
+  nameserver-policy:
+    "__SERVER_DOMAIN__":
+      - "https://__DNS_DIRECT__/dns-query"
+    "rule-set:geosite-cn":
+      - "https://__DNS_DIRECT__/dns-query"
+  nameserver:
+    - "https://__DNS_REMOTE__/dns-query#PROXY"
+
+proxies:
+  - name: "__NODE_TAG__"
+    type: vless
+    server: "__SERVER_IP__"
+    port: __VLESS_PORT__
+    uuid: "__SUB_UUID__"
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    packet-encoding: xudp
+    servername: "__SERVER_DOMAIN__"
+    client-fingerprint: "__UTLS_FP__"
+    reality-opts:
+      public-key: "__REALITY_PUB__"
+      short-id: "__REALITY_SID__"
+__MIHOMO_HY2_PROXY_BLOCK__
+
+proxy-groups:
+__MIHOMO_PROXY_GROUPS_BLOCK__
+
+rule-providers:
+  geosite-cn:
+    type: http
+    behavior: domain
+    format: mrs
+    url: "__RULESET_MIHOMO_GEOSITE_CN__"
+    path: ./rules/geosite-cn.mrs
+    proxy: PROXY
+    interval: 86400
+  geoip-cn:
+    type: http
+    behavior: ipcidr
+    format: mrs
+    url: "__RULESET_MIHOMO_GEOIP_CN__"
+    path: ./rules/geoip-cn.mrs
+    proxy: PROXY
+    interval: 86400
+
+rules:
+  # 1. 私有网络（含 CGNAT / Tailscale 与链路本地）与服务器自身域名/公网 IP 直连（防止拉取订阅产生代理回环）
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - DOMAIN,__SERVER_DOMAIN__,DIRECT
+  - IP-CIDR,__SERVER_IP__/32,DIRECT,no-resolve
+  # 2. 服务端无 IPv6 时拒绝公网 IPv6 流量防止绕过
+  __MIHOMO_IPV6_RULE__
+  # 3. 中国大陆域名与 IP 直连
+  - RULE-SET,geosite-cn,DIRECT
+  - RULE-SET,geoip-cn,DIRECT,no-resolve
+  # 4. 拒绝海外 QUIC (UDP 443)，迫使回退至 TCP 以发挥 Vision 消除特征
+  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
+  # 5. 其余全部走固定出口代理
+  - MATCH,PROXY

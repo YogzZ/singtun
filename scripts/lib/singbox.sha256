@@ -1,0 +1,5 @@
+# Official SagerNet sing-box GitHub Release .deb SHA256 checksums
+# Retrieved: 2026-11-09 from https://github.com/SagerNet/sing-box/releases/download/v<VERSION>/
+# Method: curl -fsSL https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box_1.14.4_linux_<arch>.deb | sha256sum
+4e9b8809aed0e3ac78ad14fa3a0af533402425d736f0cc9dc75b1c03d381b614  sing-box_1.14.4_linux_amd64.deb
+8f52525d84ff0f4fd2cec4bb12ed330590fc741ea5250fe7cfc94ae1f1069ac2  sing-box_1.14.4_linux_arm64.deb

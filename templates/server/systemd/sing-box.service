@@ -1,0 +1,35 @@
+# Managed by ssctl (40-deploy-server.sh)
+# Drop-in override for /etc/systemd/system/sing-box.service.d/override.conf
+#
+# 注意：官方 deb 单元已授予 CAP_NET_ADMIN / NET_RAW / NET_BIND_SERVICE / SYS_PTRACE / DAC_READ_SEARCH。
+# systemd 对 CapabilityBoundingSet / AmbientCapabilities 的多次赋值按"合并"处理，
+# 必须先以空值重置，再声明所需能力，才能真正收敛为仅 CAP_NET_BIND_SERVICE。
+[Service]
+User=sing-box
+Group=sing-box
+StateDirectory=sing-box
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+LockPersonality=true
+ReadOnlyPaths=/etc/sing-box
+ReadOnlyPaths=-/etc/ssctl/cert
+ReadOnlyPaths=-/var/www/ssctl-site
+ExecStart=
+ExecStart=/usr/bin/sing-box run -D /var/lib/sing-box -C /etc/sing-box
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=1048576
+TasksMax=4096

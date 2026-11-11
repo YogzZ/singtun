@@ -1,0 +1,23 @@
+{
+  "inbounds": [
+    {
+      "type": "hysteria2",
+      "tag": "hy2-in",
+      "listen": "0.0.0.0",
+      "listen_port": 8443,
+      "users": [],
+      "masquerade": {
+        "type": "file",
+        "directory": "/var/www/ssctl-site"
+      },
+      "tls": {
+        "enabled": true,
+        "alpn": [
+          "h3"
+        ],
+        "certificate_path": "/etc/ssctl/cert/fullchain.pem",
+        "key_path": "/etc/ssctl/cert/key.pem"
+      }
+    }
+  ]
+}

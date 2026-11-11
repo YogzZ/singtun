@@ -1,0 +1,1589 @@
+#!/usr/bin/env bash
+# ssctl — 个人跨境代理服务端部署与多端订阅管理 CLI
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/common.sh
+source "${REPO_ROOT}/scripts/lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+用法: ./ssctl <command> [args]
+
+部署与生命周期:
+  init                              从 examples/ 初始化 private/，生成 REALITY 密钥对、short_id 与随机订阅前缀
+  deploy                            依次执行 00-preflight → 10-harden → 20-optimize → 30-cert → 40-deploy-server
+  upgrade <version>                 先暂存候选二进制完成配置预检，再升级版本并同步配置；失败自动无损回滚
+  uninstall [--purge-cert]          移除服务、配置、Nginx 站点及防火墙/nftables 规则，保留 private/（默认保留证书）
+
+订阅与客户端配置:
+  add [name] [--qr <type>]          按需创建新订阅（省略名称自动编号 sub-1...），同步服务端并输出 4 种客户端订阅链接
+  list                              查看当前所有订阅条目及公网托管开关状态
+  show <name> [--qr <type>]         查看指定订阅的 4 种客户端订阅链接与一键导入深链
+  reset <name> [--qr <type>]        重置指定订阅的 UUID、Hysteria2 密码与订阅 Token（旧节点与旧链接立即同时作废）
+  del <name>                        吊销并彻底删除指定订阅及其本地/公网产物
+  flush [name] [--local-only]       重新渲染全部或指定订阅的客户端配置并原子同步公网订阅目录
+
+运维、诊断与帮助:
+  check                             离线渲染校验服务端与全部 4 种客户端配置（不改动系统）
+  status                            查看 sing-box / Nginx / 防护单元状态及 TLS 证书剩余有效期（建议使用 sudo）
+  logs                              实时跟踪 sing-box 与 Nginx 日志（建议使用 sudo）
+  restart                           重启 Nginx、sing-box 及已启用的防护/端口跳跃单元
+  renew                             强制续期证书并按需重载服务
+  help [command]                    显示命令总览，或查看指定子命令的详细用法与示例（亦可使用 <command> --help）
+
+二维码选项 (--qr <type>):
+  默认不在终端刷屏输出大二维码；传入 --qr v2ray | singbox | mihomo | sr | vless | hy2 可在终端渲染对应单个二维码。
+EOF
+}
+
+print_command_help() {
+  local cmd="$1"
+  case "${cmd}" in
+    init)
+      cat <<'EOF'
+用法: ./ssctl init
+
+功能说明:
+  从 examples/ 初始化 private/.env 与 private/host-facts.md，自动生成 REALITY 密钥对、
+  REALITY_SHORT_ID 与高熵无特征订阅前缀 SUB_PATH_PREFIX，并挂载本地 Git 防泄漏钩子。
+
+对现有服务与订阅的影响:
+  幂等安全。若 private/.env 已存在，仅补全缺失项，不会覆盖已有密钥或影响线上订阅。
+
+示例:
+  ./ssctl init
+EOF
+      ;;
+    deploy)
+      cat <<'EOF'
+用法: sudo ./ssctl deploy
+
+功能说明:
+  依次执行 00-preflight → 10-harden → 20-optimize → 30-cert → 40-deploy-server，
+  完成环境预检、UFW 防火墙收敛、VLESS 入站连接限流、BBR 调优、证书签发、服务端渲染部署及客户端订阅目录同步。
+
+对现有服务与订阅的影响:
+  幂等重部署。sing-box 会短暂重启约 1 秒（活跃连接自动重连），已有订阅链接与节点凭据保持不变。
+
+示例:
+  sudo ./ssctl deploy
+EOF
+      ;;
+    add)
+      cat <<'EOF'
+用法: sudo ./ssctl add [name] [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]
+
+功能说明:
+  创建一条独立订阅（省略 name 时自动编号为 sub-1、sub-2...），分配独立 UUID 与 256-bit 订阅令牌，
+  自动同步更新服务端 sing-box 入站、调用 flush 生成 4 种客户端配置并发布公网订阅链接。
+
+对现有服务与订阅的影响:
+  sing-box 短暂重启约 1 秒以加载新用户；其他已有订阅不受影响。
+
+示例:
+  sudo ./ssctl add
+  sudo ./ssctl add iphone
+  sudo ./ssctl add iphone --qr v2ray
+EOF
+      ;;
+    list)
+      cat <<'EOF'
+用法: ./ssctl list
+
+功能说明:
+  列出公网订阅托管开关状态 (ENABLE_SUBSCRIPTION) 及当前已创建的所有订阅名称列表。
+  不输出敏感 Token 或节点链接，适合日常快速查看。
+
+对现有服务与订阅的影响:
+  只读操作，无任何修改。
+
+示例:
+  ./ssctl list
+EOF
+      ;;
+    show)
+      cat <<'EOF'
+用法: ./ssctl show <name> [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]
+
+功能说明:
+  查看指定订阅的 4 种专属客户端订阅 URL（v2ray / sing-box.json / mihomo.yaml / shadowrocket.conf）、
+  客户端一键导入深链及原始节点链接；可通过 --qr 在终端渲染对应二维码。
+
+对现有服务与订阅的影响:
+  只读操作，无任何修改。
+
+示例:
+  ./ssctl show iphone
+  ./ssctl show iphone --qr singbox
+EOF
+      ;;
+    reset)
+      cat <<'EOF'
+用法: sudo ./ssctl reset <name> [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]
+
+功能说明:
+  重置指定订阅的 UUID（含同源派生的 Hysteria2 密码）与 256-bit 订阅 Token，
+  同步更新服务端入站与公网订阅目录，并输出新的订阅链接。
+
+对现有服务与订阅的影响:
+  该订阅原有的节点凭据与旧订阅 URL 立即同时作废（需在客户端重新导入新链接）；其他订阅不受影响。
+
+示例:
+  sudo ./ssctl reset iphone
+  sudo ./ssctl reset iphone --qr v2ray
+EOF
+      ;;
+    del)
+      cat <<'EOF'
+用法: sudo ./ssctl del <name>
+
+功能说明:
+  吊销并彻底删除指定订阅，从服务端移除对应入站用户，并清理本地 private/out/<name>/ 与公网订阅产物。
+
+对现有服务与订阅的影响:
+  该订阅立即失效并断开连接；其他订阅不受影响。
+
+示例:
+  sudo ./ssctl del iphone
+EOF
+      ;;
+    flush)
+      cat <<'EOF'
+用法: sudo ./ssctl flush [name] [--local-only]
+
+功能说明:
+  根据当前 private/.env 与客户端模板，重新渲染全部（或指定）订阅的 4 种客户端配置文件，
+  并通过符号链接原子切换同步至公网订阅目录 /var/lib/ssctl/sub-web（传入 --local-only 则仅更新本地 private/out/）。
+
+对现有服务与订阅的影响:
+  不重启服务端 sing-box，不改变任何订阅的 UUID 或 Token（订阅链接不变）。
+  适合修改了客户端相关参数（如 SINGBOX_CLIENT_COMPAT、DNS、规则集地址）或客户端模板后刷新产物；
+  若修改了服务端协议、混淆或端口（如 ENABLE_HY2、HY2_OBFS、HY2_HOP_PORTS），请执行 'sudo ./ssctl deploy'。
+
+示例:
+  sudo ./ssctl flush
+  sudo ./ssctl flush iphone
+  ./ssctl flush --local-only
+EOF
+      ;;
+    check)
+      cat <<'EOF'
+用法: ./ssctl check
+
+功能说明:
+  在隔离临时目录中离线渲染服务端（sing-box + Nginx + 多态回落站）与 4 种客户端配置，
+  执行环境变量预检、sing-box check（零弃用警告）与 nginx -t 语法校验。
+
+对现有服务与订阅的影响:
+  纯离线只读校验，不改动系统任何文件或服务。
+
+示例:
+  ./ssctl check
+EOF
+      ;;
+    status)
+      cat <<'EOF'
+用法: sudo ./ssctl status
+
+功能说明:
+  查看 sing-box、nginx（及已启用的 ssctl-vless-guard、ssctl-hy2-hop）的 systemd 运行状态，
+  并检查 TLS 证书剩余有效天数（低于 20 天或已过期时给出告警）。
+
+对现有服务与订阅的影响:
+  只读操作，无任何修改。
+
+示例:
+  sudo ./ssctl status
+EOF
+      ;;
+    logs)
+      cat <<'EOF'
+用法: sudo ./ssctl logs
+
+功能说明:
+  通过 journalctl 实时跟踪 sing-box 与 nginx 的 systemd 服务日志（按 Ctrl+C 退出）。
+
+对现有服务与订阅的影响:
+  只读操作，无任何修改。
+
+示例:
+  sudo ./ssctl logs
+EOF
+      ;;
+    restart)
+      cat <<'EOF'
+用法: sudo ./ssctl restart
+
+功能说明:
+  直接重启 nginx、sing-box 及已启用的 ssctl-vless-guard / ssctl-hy2-hop 单元（不重新渲染配置文件）。
+  注：若修改了 private/.env 参数，请执行 'sudo ./ssctl deploy' 或 'sudo ./ssctl flush'。
+
+对现有服务与订阅的影响:
+  服务短暂重启约 1 秒，已有订阅与凭据不变。
+
+示例:
+  sudo ./ssctl restart
+EOF
+      ;;
+    renew)
+      cat <<'EOF'
+用法: sudo ./ssctl renew
+
+功能说明:
+  调用 acme.sh --force 忽略剩余有效期强制重新签发 Let's Encrypt 证书，并按需重载服务。
+  注：正常情况下由 cron 自动续期，受 Let's Encrypt 速率限制请勿频繁手动执行。
+
+对现有服务与订阅的影响:
+  Nginx 平滑 reload（启用 ENABLE_HY2=true 时同步重启 sing-box），已有订阅不受影响。
+
+示例:
+  sudo ./ssctl renew
+EOF
+      ;;
+    upgrade)
+      cat <<'EOF'
+用法: sudo ./ssctl upgrade <version>
+
+功能说明:
+  先将目标版本官方安装包下载（或验证本地包）并解压至临时隔离目录，以暂存的候选 sing-box 二进制
+  完成服务端与客户端配置预检；全部通过后再替换二进制、更新 SINGBOX_VERSION 并原子同步配置；失败自动无损回滚。
+
+对现有服务与订阅的影响:
+  sing-box 短暂重启切换版本，已有订阅与凭据不变。
+
+示例:
+  sudo ./ssctl upgrade 1.14.4
+EOF
+      ;;
+    uninstall)
+      cat <<'EOF'
+用法: sudo ./ssctl uninstall [--purge-cert]
+
+功能说明:
+  停止并移除 sing-box 服务覆盖配置、Nginx 回落站点与调优项、公网订阅目录、内核与日志调优参数，
+  以及代理相关的 UFW 规则与 nftables 表（ssctl_guard / ssctl_hy2）。
+  始终保留宿主活跃 SSH 规则与 private/ 目录；默认保留 /etc/ssctl/cert/ 证书以免重装触发限流，加 --purge-cert 可一并删除证书。
+
+对现有服务与订阅的影响:
+  代理服务与公网订阅停止；因保留了 private/.env，日后重新运行 'sudo ./ssctl deploy' 即可原样恢复全部订阅。
+
+示例:
+  sudo ./ssctl uninstall
+  sudo ./ssctl uninstall --purge-cert
+EOF
+      ;;
+    help)
+      usage
+      ;;
+    *)
+      log_error "未知子命令: ${cmd}"
+      usage
+      return 1
+      ;;
+  esac
+}
+
+cmd_help() {
+  if (( $# == 0 )); then
+    usage
+    return 0
+  fi
+  if (( $# > 1 )); then
+    die "多余的参数: $2（用法: ./ssctl help [command]）"
+  fi
+  case "$1" in
+    -h|--help)
+      usage
+      ;;
+    *)
+      print_command_help "$1"
+      ;;
+  esac
+}
+
+has_help_flag() {
+  local arg
+  for arg in "$@"; do
+    if [[ "${arg}" == "-h" || "${arg}" == "--help" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+generate_reality_keypair() {
+  if command -v sing-box >/dev/null 2>&1; then
+    local out priv pub
+    out="$(sing-box generate reality-keypair)"
+    priv="$(awk '/PrivateKey:/ {print $2}' <<< "${out}")"
+    pub="$(awk '/PublicKey:/ {print $2}' <<< "${out}")"
+    printf '%s %s\n' "${priv}" "${pub}"
+    return 0
+  fi
+
+  require_cmd openssl
+  local pem_file
+  make_temp_file pem_file
+  openssl genpkey -algorithm X25519 -out "${pem_file}" >/dev/null 2>&1
+
+  local priv pub
+  priv="$(openssl pkey -in "${pem_file}" -outform DER | tail -c 32 | base64 | tr '+/' '-_' | tr -d '=\n')"
+  pub="$(openssl pkey -in "${pem_file}" -pubout -outform DER | tail -c 32 | base64 | tr '+/' '-_' | tr -d '=\n')"
+  rm -f "${pem_file}"
+  printf '%s %s\n' "${priv}" "${pub}"
+}
+
+generate_hex_bytes() {
+  local nbytes="$1"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex "${nbytes}" | tr '[:upper:]' '[:lower:]' | tr -d '\n'
+  else
+    head -c "${nbytes}" /dev/urandom | od -An -tx1 | tr -d ' \n' | tr '[:upper:]' '[:lower:]'
+  fi
+}
+
+generate_short_id() {
+  generate_hex_bytes 8
+}
+
+generate_sub_prefix() {
+  # 生成 16 位随机无特征路径前缀（p + 15 位十六进制），确保不以特征词开头
+  local pfx=""
+  while true; do
+    pfx="p$(generate_hex_bytes 8)"
+    pfx="${pfx:0:16}"
+    if is_valid_sub_prefix "${pfx}"; then
+      printf '%s' "${pfx}"
+      return 0
+    fi
+  done
+}
+
+generate_sub_token() {
+  # 256-bit (64 hex chars) 独立订阅令牌
+  generate_hex_bytes 32
+}
+
+generate_uuid() {
+  if command -v sing-box >/dev/null 2>&1; then
+    sing-box generate uuid | tr '[:upper:]' '[:lower:]' | tr -d '\n'
+  elif command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '\n'
+  elif [[ -r /proc/sys/kernel/random/uuid ]]; then
+    tr '[:upper:]' '[:lower:]' < /proc/sys/kernel/random/uuid | tr -d '\n'
+  else
+    die "无法生成 UUID：缺少 sing-box / uuidgen / /proc/sys/kernel/random/uuid"
+  fi
+}
+
+validate_nginx_rendered_config() {
+  local srv_dir="$1"
+  local site_conf="${srv_dir}/nginx/site.conf"
+
+  [[ -f "${site_conf}" ]] || die "缺少渲染后的 Nginx 配置文件: ${site_conf}"
+  assert_no_unreplaced_placeholders "${site_conf}"
+
+  if [[ -f "${srv_dir}/www/index.html" ]]; then
+    assert_no_unreplaced_placeholders "${srv_dir}/www/index.html"
+  fi
+
+  if ! command -v nginx >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+    log_warn "本机未同时安装 nginx 与 openssl，已完成 Nginx 模板渲染与占位符校验（跳过 nginx -t）。"
+    return 0
+  fi
+
+  mkdir -p "${srv_dir}/cert" "${srv_dir}/tmp" "${srv_dir}/sub-web"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+    -keyout "${srv_dir}/cert/key.pem" \
+    -out "${srv_dir}/cert/fullchain.pem" \
+    -days 1 -nodes -subj "/CN=${SERVER_DOMAIN}" >/dev/null 2>&1
+
+  local site_check_conf="${srv_dir}/nginx/site-check.conf"
+  sed \
+    -e "s|/etc/ssctl/cert/fullchain.pem|${srv_dir}/cert/fullchain.pem|g" \
+    -e "s|/etc/ssctl/cert/key.pem|${srv_dir}/cert/key.pem|g" \
+    -e "s|/var/www/ssctl-site|${srv_dir}/www|g" \
+    -e "s|/var/lib/ssctl/sub-web|${srv_dir}/sub-web|g" \
+    "${site_conf}" > "${site_check_conf}"
+
+  local wrapper_conf="${srv_dir}/nginx-wrapper.conf"
+  cat > "${wrapper_conf}" <<EOF
+pid ${srv_dir}/nginx.pid;
+error_log ${srv_dir}/error.log;
+events {
+    worker_connections 64;
+}
+http {
+    access_log off;
+    client_body_temp_path ${srv_dir}/tmp/body;
+    proxy_temp_path ${srv_dir}/tmp/proxy;
+    fastcgi_temp_path ${srv_dir}/tmp/fastcgi;
+    uwsgi_temp_path ${srv_dir}/tmp/uwsgi;
+    scgi_temp_path ${srv_dir}/tmp/scgi;
+    include ${site_check_conf};
+}
+EOF
+
+  local nginx_out=""
+  if nginx_out="$(nginx -t -p "${srv_dir}" -e "${srv_dir}/error.log" -c "${wrapper_conf}" 2>&1)"; then
+    log_info "Nginx 配置通过 nginx -t 语法校验。"
+    return 0
+  fi
+
+  if grep -Eq 'invalid option: "-?e"' <<< "${nginx_out}"; then
+    if nginx_out="$(nginx -t -p "${srv_dir}" -c "${wrapper_conf}" 2>&1)"; then
+      log_info "Nginx 配置通过 nginx -t 语法校验。"
+      return 0
+    fi
+    if grep -Fq "syntax is ok" <<< "${nginx_out}" && grep -Fq "/var/log/nginx/error.log" <<< "${nginx_out}"; then
+      log_info "Nginx 配置语法正确（非 root 环境下忽略 /var/log/nginx/error.log 权限限制）。"
+      return 0
+    fi
+  fi
+
+  log_error "${nginx_out}"
+  die "Nginx 渲染配置未通过 nginx -t 校验！"
+}
+
+assert_no_args() {
+  local cmd_name="$1"
+  shift
+  if (( $# > 0 )); then
+    die "多余的参数: $1（用法: ./ssctl ${cmd_name}）"
+  fi
+}
+
+cmd_init() {
+  assert_no_args "init" "$@"
+  acquire_ssctl_lock
+  ensure_private_dir_permissions
+
+  if [[ ! -f "${ENV_FILE}" ]]; then
+    cp "${REPO_ROOT}/examples/env.example" "${ENV_FILE}"
+    _preserve_env_owner_and_mode "" "${ENV_FILE}"
+    log_info "已从 examples/env.example 创建 ${ENV_FILE}"
+  else
+    log_info "${ENV_FILE} 已存在，仅补全缺失的密钥与默认项。"
+    chmod 600 "${ENV_FILE}"
+  fi
+
+  if [[ ! -f "${PRIVATE_DIR}/host-facts.md" ]]; then
+    cp "${REPO_ROOT}/examples/host-facts.example.md" "${PRIVATE_DIR}/host-facts.md"
+    _preserve_env_owner_and_mode "" "${PRIVATE_DIR}/host-facts.md"
+    log_info "已从 examples/host-facts.example.md 创建 ${PRIVATE_DIR}/host-facts.md"
+  else
+    chmod 600 "${PRIVATE_DIR}/host-facts.md" 2>/dev/null || true
+  fi
+
+  load_env
+
+  local -a init_ops=()
+  local need_keypair="false" need_sid="false" need_pfx="false"
+  local gen_priv="" gen_pub="" gen_sid="" gen_pfx=""
+
+  if [[ -z "${REALITY_PRIVATE_KEY:-}" || -z "${REALITY_PUBLIC_KEY:-}" ]]; then
+    local keypair
+    keypair="$(generate_reality_keypair)"
+    gen_priv="${keypair%% *}"
+    gen_pub="${keypair##* }"
+    init_ops+=("SET:REALITY_PRIVATE_KEY=${gen_priv}" "SET:REALITY_PUBLIC_KEY=${gen_pub}")
+    need_keypair="true"
+  fi
+
+  if [[ -z "${REALITY_SHORT_ID:-}" ]]; then
+    gen_sid="$(generate_short_id)"
+    init_ops+=("SET:REALITY_SHORT_ID=${gen_sid}")
+    need_sid="true"
+  fi
+
+  if [[ -z "${SERVER_LOG_LEVEL:-}" ]]; then
+    init_ops+=("SET:SERVER_LOG_LEVEL=warn")
+  fi
+
+  if [[ -z "${SINGBOX_CLIENT_COMPAT:-}" ]]; then
+    init_ops+=("SET:SINGBOX_CLIENT_COMPAT=1.14")
+  fi
+
+  if [[ -z "${ENABLE_SUBSCRIPTION:-}" ]]; then
+    init_ops+=("SET:ENABLE_SUBSCRIPTION=true")
+  fi
+
+  if [[ -z "${HY2_OBFS:-}" ]]; then
+    init_ops+=("SET:HY2_OBFS=false")
+  fi
+
+  if [[ -z "${SUB_PATH_PREFIX:-}" ]]; then
+    gen_pfx="$(generate_sub_prefix)"
+    init_ops+=("SET:SUB_PATH_PREFIX=${gen_pfx}")
+    need_pfx="true"
+  fi
+
+  if ! env_file_has_key "SUBSCRIPTIONS" "${ENV_FILE}"; then
+    init_ops+=("SET:SUBSCRIPTIONS=\"\"")
+  fi
+
+  local sub uuid_var tok_var new_uuid new_tok
+  local -a filled_msgs=()
+  while IFS= read -r sub; do
+    [[ -z "${sub}" ]] && continue
+    uuid_var="$(sub_uuid_var_name "${sub}")"
+    tok_var="$(sub_token_var_name "${sub}")"
+    if [[ -z "${!uuid_var:-}" ]]; then
+      new_uuid="$(generate_uuid)"
+      init_ops+=("SET:${uuid_var}=${new_uuid}")
+      filled_msgs+=("已为订阅 [${sub}] 补全 ${uuid_var}")
+    fi
+    if [[ -z "${!tok_var:-}" ]]; then
+      new_tok="$(generate_sub_token)"
+      init_ops+=("SET:${tok_var}=${new_tok}")
+      filled_msgs+=("已为订阅 [${sub}] 补全 ${tok_var}")
+    fi
+  done < <(list_subscriptions)
+
+  if (( ${#init_ops[@]} > 0 )); then
+    env_file_apply_batch "${ENV_FILE}" "${init_ops[@]}"
+    load_env
+    [[ "${need_keypair}" == "true" ]] && log_info "已生成 REALITY X25519 密钥对并写入 ${ENV_FILE}"
+    [[ "${need_sid}" == "true" ]] && log_info "已生成 REALITY_SHORT_ID (${gen_sid}) 并写入 ${ENV_FILE}"
+    [[ "${need_pfx}" == "true" ]] && log_info "已生成高熵无特征订阅路径前缀 SUB_PATH_PREFIX 并写入 ${ENV_FILE}"
+    local msg
+    for msg in "${filled_msgs[@]}"; do
+      log_info "${msg}"
+    done
+  fi
+
+  if [[ -e "${REPO_ROOT}/.git" && -f "${REPO_ROOT}/scripts/hooks/install-hooks.sh" ]]; then
+    bash "${REPO_ROOT}/scripts/hooks/install-hooks.sh"
+  fi
+
+  log_info "初始化完成！请确认 ${ENV_FILE} 中已填入真实的 SERVER_IP、SERVER_DOMAIN、ACME_EMAIL 与 CF_API_TOKEN。"
+}
+
+cmd_deploy() {
+  assert_no_args "deploy" "$@"
+  require_root
+  acquire_ssctl_lock
+  bash "${REPO_ROOT}/scripts/00-preflight.sh"
+  SSCTL_DEFER_UFW_PRUNE=true bash "${REPO_ROOT}/scripts/10-harden.sh"
+  bash "${REPO_ROOT}/scripts/20-optimize.sh"
+  bash "${REPO_ROOT}/scripts/30-cert.sh"
+  bash "${REPO_ROOT}/scripts/40-deploy-server.sh"
+  bash "${REPO_ROOT}/scripts/10-harden.sh" --post-deploy-sync
+  log_info "全部部署阶段 (00 → 40) 执行完毕！可通过 'sudo ./ssctl add [name]' 按需创建客户端订阅。"
+}
+
+require_sub_write_privilege() {
+  if [[ "${SSCTL_ALLOW_NONROOT_SUB:-false}" != "true" ]]; then
+    require_root
+  fi
+}
+
+next_auto_sub_name() {
+  local idx=1 candidate u_var t_var
+  while true; do
+    candidate="sub-${idx}"
+    u_var="$(sub_uuid_var_name "${candidate}")"
+    t_var="$(sub_token_var_name "${candidate}")"
+    if ! has_subscription "${candidate}" \
+      && ! env_file_has_key "${u_var}" "${ENV_FILE}" \
+      && ! env_file_has_key "${t_var}" "${ENV_FILE}"; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+    idx=$((idx + 1))
+  done
+}
+
+serialize_sub_list() {
+  local -a items=("$@")
+  local joined="" item
+  for item in "${items[@]}"; do
+    [[ -z "${item}" ]] && continue
+    if [[ -z "${joined}" ]]; then
+      joined="${item}"
+    else
+      joined="${joined} ${item}"
+    fi
+  done
+  printf '"%s"' "${joined}"
+}
+
+sync_runtime_after_sub_change() {
+  if is_server_deployed; then
+    log_info "正在同步更新 sing-box 入站配置（服务短暂重启约 1 秒，现有连接将自动重连）..."
+    bash "${REPO_ROOT}/scripts/40-deploy-server.sh" --sync-singbox-only || return 1
+    SSCTL_DEFER_RELEASE_PRUNE=true bash "${REPO_ROOT}/scripts/50-gen-clients.sh" || return 1
+  elif [[ -n "${SSCTL_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
+    SSCTL_DEFER_RELEASE_PRUNE=true bash "${REPO_ROOT}/scripts/50-gen-clients.sh" || return 1
+  else
+    bash "${REPO_ROOT}/scripts/50-gen-clients.sh" --local-only || return 1
+    log_warn "检测到服务端尚未完成首次部署（sing-box 未启用）：已更新 ${ENV_FILE} 与本地配置，请运行 'sudo ./ssctl deploy' 上线服务与公网订阅。"
+  fi
+  if [[ "${SSCTL_FAIL_AFTER_SUB_SYNC:-false}" == "true" ]]; then
+    log_error "注入测试故障：订阅同步完成后触发失败"
+    return 1
+  fi
+  return 0
+}
+
+save_local_snapshot() {
+  local snap_dir="$1"
+  cp -a "${ENV_FILE}" "${snap_dir}/env"
+  if [[ -f "${ENV_FILE}.bak" ]]; then
+    cp -a "${ENV_FILE}.bak" "${snap_dir}/env.bak"
+  fi
+  if [[ -d "${PRIVATE_DIR}/out" ]]; then
+    cp -a "${PRIVATE_DIR}/out" "${snap_dir}/out"
+  fi
+
+  local sub_web_base="${SSCTL_SUB_WEB_BASE_OVERRIDE:-/var/lib/ssctl}"
+  local sub_web_link="${sub_web_base}/sub-web"
+  local sub_rel_dir="${sub_web_base}/releases"
+  : > "${snap_dir}/pre_releases.list"
+  if [[ -d "${sub_rel_dir}" ]]; then
+    local rel
+    shopt -s nullglob
+    for rel in "${sub_rel_dir}"/sub-web.*; do
+      if [[ -d "${rel}" && ! -L "${rel}" ]]; then
+        printf '%s\n' "${rel}" >> "${snap_dir}/pre_releases.list"
+      fi
+    done
+    shopt -u nullglob
+  fi
+  if [[ -L "${sub_web_link}" ]]; then
+    readlink "${sub_web_link}" > "${snap_dir}/sub_web_target"
+  fi
+
+  if is_server_deployed && [[ -d "/etc/sing-box" && -r "/etc/sing-box" ]]; then
+    cp -a "/etc/sing-box" "${snap_dir}/singbox-etc"
+  fi
+}
+
+restore_local_snapshot() {
+  local snap_dir="$1"
+  local ok="true"
+  if ! cp -a "${snap_dir}/env" "${ENV_FILE}"; then
+    ok="false"
+  else
+    _preserve_env_owner_and_mode "${ENV_FILE}" "${ENV_FILE}" || ok="false"
+  fi
+  if [[ -f "${snap_dir}/env.bak" ]]; then
+    if ! cp -a "${snap_dir}/env.bak" "${ENV_FILE}.bak"; then
+      ok="false"
+    else
+      _preserve_env_owner_and_mode "${ENV_FILE}" "${ENV_FILE}.bak" || ok="false"
+    fi
+  else
+    rm -f "${ENV_FILE}.bak" || ok="false"
+  fi
+  rm -rf -- "${PRIVATE_DIR}/out" || ok="false"
+  if [[ -d "${snap_dir}/out" ]]; then
+    cp -a "${snap_dir}/out" "${PRIVATE_DIR}/out" || ok="false"
+  fi
+  [[ "${ok}" == "true" ]]
+}
+
+restore_sub_web_snapshot() {
+  local snap_dir="$1"
+  if [[ "${EUID:-$(id -u)}" -ne 0 && -z "${SSCTL_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
+    return 0
+  fi
+
+  local sub_web_base="${SSCTL_SUB_WEB_BASE_OVERRIDE:-/var/lib/ssctl}"
+  local sub_web_link="${sub_web_base}/sub-web"
+  local sub_rel_dir="${sub_web_base}/releases"
+  local ok="true"
+  local old_target=""
+
+  if [[ -f "${snap_dir}/sub_web_target" ]]; then
+    old_target="$(<"${snap_dir}/sub_web_target")"
+    if [[ -z "${old_target}" || ! -d "${old_target}" ]]; then
+      log_error "回滚异常：事务前的公网订阅发布目录不存在 (${old_target:-empty})，无法恢复软链！"
+      ok="false"
+    else
+      mkdir -p "${sub_web_base}" || ok="false"
+      local tmp_link="${sub_web_base}/sub-web.rb.$$"
+      if ! ln -sfn "${old_target}" "${tmp_link}" || ! mv -Tf "${tmp_link}" "${sub_web_link}"; then
+        rm -f "${tmp_link}" 2>/dev/null || true
+        log_error "回滚异常：无法将 ${sub_web_link} 原子切回 ${old_target}！"
+        ok="false"
+      fi
+    fi
+  else
+    if [[ -L "${sub_web_link}" || -e "${sub_web_link}" ]]; then
+      rm -rf -- "${sub_web_link}" || ok="false"
+    fi
+  fi
+
+  # 仅清理本次失败事务中新建、未提交的 sub-web.* 目录，完整保留事务前已存在的目录
+  if [[ -d "${sub_rel_dir}" ]]; then
+    local -A pre_map=()
+    local line=""
+    if [[ -f "${snap_dir}/pre_releases.list" ]]; then
+      while IFS= read -r line; do
+        [[ -n "${line}" ]] && pre_map["${line}"]=1
+      done < "${snap_dir}/pre_releases.list"
+    fi
+    local rel
+    shopt -s nullglob
+    for rel in "${sub_rel_dir}"/sub-web.*; do
+      if [[ -d "${rel}" && ! -L "${rel}" && -z "${pre_map[${rel}]:-}" && "${rel}" != "${old_target}" ]]; then
+        rm -rf -- "${rel}" || ok="false"
+      fi
+    done
+    shopt -u nullglob
+  fi
+
+  [[ "${ok}" == "true" ]]
+}
+
+# 订阅变更事务封装（目录级物理快照 + 原软链直恢复 + 成功后收敛最近 2 个发布版本）
+apply_sub_env_and_sync() {
+  local op_label="$1"
+  shift
+
+  local snap_dir
+  make_temp_dir snap_dir
+  save_local_snapshot "${snap_dir}"
+
+  env_file_apply_batch "${ENV_FILE}" "$@"
+  load_env
+  log_info "${op_label}"
+
+  if ! ( sync_runtime_after_sub_change ); then
+    log_error "订阅运行时同步或客户端校验失败，正在从事务快照直接恢复 ${ENV_FILE}、本地产物与原公网软链..."
+    local rb_ok="true"
+    restore_local_snapshot "${snap_dir}" || rb_ok="false"
+    restore_sub_web_snapshot "${snap_dir}" || rb_ok="false"
+    if ! ( load_env ); then
+      rb_ok="false"
+    else
+      load_env
+    fi
+    if is_server_deployed; then
+      if [[ -d "${snap_dir}/singbox-etc" ]]; then
+        if ! rm -rf -- "/etc/sing-box" || ! cp -a "${snap_dir}/singbox-etc" "/etc/sing-box"; then
+          rb_ok="false"
+        fi
+      fi
+      if ! systemctl restart sing-box || ! systemctl is-active --quiet sing-box; then
+        log_error "回滚异常：恢复 /etc/sing-box 后重启 sing-box 失败！"
+        rb_ok="false"
+      fi
+    fi
+    if [[ "${rb_ok}" != "true" ]]; then
+      die "严重错误：订阅操作失败，且回滚过程中发生异常！请立即检查系统与订阅目录状态。"
+    fi
+    die "订阅操作失败，已完整回滚至操作前状态。"
+  fi
+
+  if [[ "${EUID:-$(id -u)}" -eq 0 || -n "${SSCTL_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
+    bash "${REPO_ROOT}/scripts/50-gen-clients.sh" --finalize-releases
+  fi
+}
+
+print_subscription_info() {
+  local sub="$1"
+  local qr_type="${2:-}"
+
+  load_env
+  if ! has_subscription "${sub}"; then
+    die "订阅 '${sub}' 不存在（可执行 './ssctl list' 查看当前列表）。"
+  fi
+
+  local uuid tok base_url v2ray_url sb_url mihomo_url sr_url vless_uri hy2_uri=""
+  uuid="$(get_sub_uuid "${sub}")"
+  tok="$(get_sub_token "${sub}")"
+  base_url="$(build_sub_base_url "${tok}")"
+  v2ray_url="${base_url}/v2ray"
+  sb_url="${base_url}/sing-box.json"
+  mihomo_url="${base_url}/mihomo.yaml"
+  sr_url="${base_url}/shadowrocket.conf"
+  vless_uri="$(build_vless_uri "${sub}" "${uuid}")"
+  if [[ "${ENABLE_HY2:-false}" == "true" ]]; then
+    hy2_uri="$(build_hy2_uri "${sub}" "${uuid}")"
+  fi
+
+  local sb_enc mihomo_enc v2ray_b64
+  sb_enc="$(urlencode_str "${sb_url}")"
+  mihomo_enc="$(urlencode_str "${mihomo_url}")"
+  v2ray_b64="$(printf '%s' "${v2ray_url}" | base64 | tr -d '\n=')"
+
+  printf '\n========================================================================\n'
+  printf '订阅名称: %s  (公网托管: ENABLE_SUBSCRIPTION=%s | Hysteria2: ENABLE_HY2=%s)\n' "${sub}" "${ENABLE_SUBSCRIPTION:-true}" "${ENABLE_HY2:-false}"
+  printf '本地备份: %s/out/%s/\n' "${PRIVATE_DIR}" "${sub}"
+  printf '========================================================================\n'
+
+  if [[ "${ENABLE_SUBSCRIPTION:-true}" == "true" ]]; then
+    printf '\n[1] 通用节点订阅 (Shadowrocket / v2rayN / v2rayNG — Base64):\n    %s\n' "${v2ray_url}"
+    printf '\n[2] sing-box 远程配置 (macOS/iOS/Android SFM/SFA >= %s / Linux):\n    %s\n' "${SINGBOX_CLIENT_COMPAT:-1.14}" "${sb_url}"
+    printf '\n[3] Clash.Meta / mihomo 远程配置 (Clash Verge Rev / FlClash / OpenClash):\n    %s\n' "${mihomo_url}"
+    printf '\n[4] Shadowrocket 远程分流配置 (iOS 配置页添加 URL，免手动传文件):\n    %s\n' "${sr_url}"
+
+    printf '\n[客户端一键唤起深链]\n'
+    printf '  - SFM / SFA   : sing-box://import-remote-profile?url=%s#%s-%s\n' "${sb_enc}" "${SERVER_DOMAIN}" "${sub}"
+    printf '  - Clash Verge : clash://install-config?url=%s&name=%s-%s\n' "${mihomo_enc}" "${SERVER_DOMAIN}" "${sub}"
+    printf '  - Shadowrocket: sub://%s#%s-%s\n' "${v2ray_b64}" "${SERVER_DOMAIN}" "${sub}"
+    printf '  - SR 分流规则 : shadowrocket://config/add/%s\n' "${sr_url}"
+  else
+    printf '\n[提示] 当前 ENABLE_SUBSCRIPTION=false，未开放公网 HTTPS 订阅链接；请从本地目录取回配置文件。\n'
+  fi
+
+  printf '\n[兜底原始节点链接]\n  - VLESS REALITY Vision:\n    %s\n' "${vless_uri}"
+  if [[ -n "${hy2_uri}" ]]; then
+    printf '  - Hysteria2 (QUIC 备用):\n    %s\n' "${hy2_uri}"
+  fi
+  printf '\n[安全提醒] 订阅链接包含完整节点凭据，切勿截图、公开粘贴或转发他人！\n'
+  printf '           一旦怀疑链接泄露，请立即执行: sudo ./ssctl reset %s\n' "${sub}"
+  printf '           如需终端扫码，可追加参数: --qr v2ray | singbox | mihomo | sr | vless | hy2\n'
+  printf '========================================================================\n'
+
+  if [[ -n "${qr_type}" ]]; then
+    require_cmd qrencode
+    local qr_target="" qr_label=""
+    case "${qr_type}" in
+      v2ray)
+        qr_target="${v2ray_url}"
+        qr_label="通用节点订阅 (v2ray Base64)"
+        ;;
+      singbox|sing-box)
+        qr_target="${sb_url}"
+        qr_label="sing-box 远程配置 (JSON)"
+        ;;
+      mihomo|clash)
+        qr_target="${mihomo_url}"
+        qr_label="Clash.Meta / mihomo 远程配置 (YAML)"
+        ;;
+      sr|shadowrocket)
+        qr_target="${sr_url}"
+        qr_label="Shadowrocket 远程分流配置 (.conf)"
+        ;;
+      vless)
+        qr_target="${vless_uri}"
+        qr_label="原始单节点链接 (vless://)"
+        ;;
+      hy2|hysteria2)
+        if [[ -z "${hy2_uri}" ]]; then
+          die "当前 ENABLE_HY2=false，未启用 Hysteria2 节点，无法生成 '--qr hy2' 二维码。"
+        fi
+        qr_target="${hy2_uri}"
+        qr_label="原始单节点链接 (hysteria2://)"
+        ;;
+      *)
+        die "未知的 --qr 类型 '${qr_type}'（支持: v2ray | singbox | mihomo | sr | vless | hy2）"
+        ;;
+    esac
+    if [[ "${ENABLE_SUBSCRIPTION:-true}" != "true" && "${qr_type}" != "vless" && "${qr_type}" != "hy2" && "${qr_type}" != "hysteria2" ]]; then
+      die "当前 ENABLE_SUBSCRIPTION=false，仅支持 '--qr vless' 或 '--qr hy2' 输出离线节点二维码。"
+    fi
+    log_info "订阅 [${sub}] — ${qr_label} 二维码:"
+    printf '%s' "${qr_target}" | qrencode -t ANSIUTF8
+  fi
+}
+
+parse_sub_name_and_qr() {
+  SUB_PARSED_NAME=""
+  SUB_PARSED_QR=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --qr)
+        [[ $# -ge 2 ]] || die "--qr 参数缺少类型值（支持: v2ray | singbox | mihomo | sr | vless | hy2）"
+        SUB_PARSED_QR="$2"
+        shift 2
+        ;;
+      --qr=*)
+        SUB_PARSED_QR="${1#--qr=}"
+        shift
+        ;;
+      -*)
+        die "未知选项: $1"
+        ;;
+      *)
+        if [[ -n "${SUB_PARSED_NAME}" ]]; then
+          die "多余的位置参数: $1"
+        fi
+        SUB_PARSED_NAME="$1"
+        shift
+        ;;
+    esac
+  done
+}
+
+cmd_add() {
+  require_sub_write_privilege
+  acquire_ssctl_lock
+  load_env
+
+  parse_sub_name_and_qr "$@"
+  local name="${SUB_PARSED_NAME}"
+  local qr_type="${SUB_PARSED_QR}"
+
+  if [[ -z "${name}" ]]; then
+    name="$(next_auto_sub_name)"
+  fi
+
+  if is_reserved_sub_name "${name}"; then
+    die "订阅名 '${name}' 为系统保留字，请换用其他名称（如 iphone、macbook、sub-1）。"
+  fi
+  if ! is_valid_sub_name "${name}"; then
+    die "订阅名 '${name}' 格式非法（仅允许小写字母、数字与非首尾短横线，长度 1-32）。"
+  fi
+  if has_subscription "${name}"; then
+    die "订阅 '${name}' 已存在！如需查看链接请执行 './ssctl show ${name}'，如需重置凭据请执行 'sudo ./ssctl reset ${name}'。"
+  fi
+
+  local u_var t_var
+  u_var="$(sub_uuid_var_name "${name}")"
+  t_var="$(sub_token_var_name "${name}")"
+  if env_file_has_key "${u_var}" "${ENV_FILE}" || env_file_has_key "${t_var}" "${ENV_FILE}"; then
+    die "检测到 ${ENV_FILE} 中已存在孤立变量 ${u_var} 或 ${t_var}（不属于当前活跃订阅），为防凭据冲突已中止，请先清理该旧变量！"
+  fi
+
+  local new_uuid new_tok
+  new_uuid="$(generate_uuid)"
+  new_tok="$(generate_sub_token)"
+
+  local -a subs=()
+  local s
+  while IFS= read -r s; do
+    [[ -n "${s}" ]] && subs+=("${s}")
+  done < <(list_subscriptions)
+  subs+=("${name}")
+
+  local serialized
+  serialized="$(serialize_sub_list "${subs[@]}")"
+  apply_sub_env_and_sync \
+    "已创建新订阅 [${name}] 并分配独立 UUID 与 256-bit 订阅令牌。" \
+    "SET:SUBSCRIPTIONS=${serialized}" \
+    "SET:${u_var}=${new_uuid}" \
+    "SET:${t_var}=${new_tok}"
+  print_subscription_info "${name}" "${qr_type}"
+}
+
+cmd_list() {
+  assert_no_args "list" "$@"
+  load_env
+  local count=0 s
+  printf '公网订阅托管开关: ENABLE_SUBSCRIPTION=%s\n' "${ENABLE_SUBSCRIPTION:-true}"
+  printf '当前订阅列表:\n'
+  while IFS= read -r s; do
+    [[ -z "${s}" ]] && continue
+    count=$((count + 1))
+    printf '  %d. %s\n' "${count}" "${s}"
+  done < <(list_subscriptions)
+
+  if (( count == 0 )); then
+    printf '  (空 — 可通过 "sudo ./ssctl add [name]" 按需创建新订阅)\n'
+  fi
+}
+
+cmd_show() {
+  parse_sub_name_and_qr "$@"
+  [[ -n "${SUB_PARSED_NAME}" ]] || die "用法: ./ssctl show <name> [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]"
+  print_subscription_info "${SUB_PARSED_NAME}" "${SUB_PARSED_QR}"
+}
+
+cmd_reset() {
+  require_sub_write_privilege
+  acquire_ssctl_lock
+  load_env
+
+  parse_sub_name_and_qr "$@"
+  local name="${SUB_PARSED_NAME}"
+  local qr_type="${SUB_PARSED_QR}"
+  [[ -n "${name}" ]] || die "用法: sudo ./ssctl reset <name> [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]"
+
+  if ! has_subscription "${name}"; then
+    die "订阅 '${name}' 不存在，无法重置。"
+  fi
+
+  local old_uuid old_tok new_uuid new_tok u_var t_var
+  old_uuid="$(get_sub_uuid "${name}")"
+  old_tok="$(get_sub_token "${name}")"
+  u_var="$(sub_uuid_var_name "${name}")"
+  t_var="$(sub_token_var_name "${name}")"
+
+  new_uuid="$(generate_uuid)"
+  while [[ "${new_uuid}" == "${old_uuid}" ]]; do
+    new_uuid="$(generate_uuid)"
+  done
+
+  new_tok="$(generate_sub_token)"
+  while [[ "${new_tok}" == "${old_tok}" ]]; do
+    new_tok="$(generate_sub_token)"
+  done
+
+  apply_sub_env_and_sync \
+    "已重置订阅 [${name}] 的 UUID 与 256-bit 订阅令牌（旧节点与旧订阅 URL 即将同时失效）。" \
+    "SET:${u_var}=${new_uuid}" \
+    "SET:${t_var}=${new_tok}"
+  print_subscription_info "${name}" "${qr_type}"
+}
+
+cmd_del() {
+  require_sub_write_privilege
+  acquire_ssctl_lock
+  load_env
+
+  local name="${1:-}"
+  [[ -n "${name}" && "${name}" != -* ]] || die "用法: sudo ./ssctl del <name>"
+  if (( $# > 1 )); then
+    die "多余的参数: $2（用法: sudo ./ssctl del <name>）"
+  fi
+
+  if ! has_subscription "${name}"; then
+    die "订阅 '${name}' 不存在，无需删除。"
+  fi
+
+  local -a kept=()
+  local s
+  while IFS= read -r s; do
+    [[ -n "${s}" && "${s}" != "${name}" ]] && kept+=("${s}")
+  done < <(list_subscriptions)
+
+  local serialized u_var t_var
+  if (( ${#kept[@]} == 0 )); then
+    serialized='""'
+  else
+    serialized="$(serialize_sub_list "${kept[@]}")"
+  fi
+  u_var="$(sub_uuid_var_name "${name}")"
+  t_var="$(sub_token_var_name "${name}")"
+
+  apply_sub_env_and_sync \
+    "已从配置中吊销订阅 [${name}]。" \
+    "SET:SUBSCRIPTIONS=${serialized}" \
+    "DEL:${u_var}" \
+    "DEL:${t_var}"
+  log_info "订阅 [${name}] 已彻底删除（服务端入站、公网链接与本地目录均已清理）。"
+}
+
+prepare_check_cert_dir() {
+  local cert_dir="$1"
+  mkdir -p "${cert_dir}"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+      -keyout "${cert_dir}/key.pem" \
+      -out "${cert_dir}/fullchain.pem" \
+      -days 1 -nodes -subj "/CN=${SERVER_DOMAIN}" >/dev/null 2>&1
+  fi
+}
+
+cmd_check() {
+  assert_no_args "check" "$@"
+  load_env
+  require_cmd jq base64
+
+  # 1. 运行当前配置的预检（跳过宿主 OS、公网 DNS 与端口占用检查）
+  SKIP_OS_CHECK=true SKIP_DNS_CHECK=true SKIP_PORT_CHECK=true \
+    bash "${REPO_ROOT}/scripts/00-preflight.sh"
+
+  # 2. 校验当前 .env 渲染出的服务端配置与 Nginx 配置
+  local tmp_srv_dir tmp_priv_dir
+  make_temp_dir tmp_srv_dir
+  make_temp_dir tmp_priv_dir
+
+  prepare_check_cert_dir "${tmp_srv_dir}/cert"
+  SSCTL_CERT_DIR_OVERRIDE="${tmp_srv_dir}/cert" SSCTL_WEB_ROOT_OVERRIDE="${tmp_srv_dir}/www" \
+    bash "${REPO_ROOT}/scripts/40-deploy-server.sh" --render-only "${tmp_srv_dir}"
+
+  local f
+  for f in "${tmp_srv_dir}"/singbox/*.json; do
+    jq empty "${f}"
+  done
+
+  local sb_bin="${SSCTL_SINGBOX_BIN:-}"
+  if [[ -n "${sb_bin}" ]]; then
+    [[ -x "${sb_bin}" ]] || die "指定的 SSCTL_SINGBOX_BIN 不可执行: ${sb_bin}"
+  elif command -v sing-box >/dev/null 2>&1; then
+    sb_bin="$(command -v sing-box)"
+  fi
+
+  if [[ -n "${sb_bin}" ]]; then
+    local sb_out=""
+    if ! sb_out="$("${sb_bin}" check -C "${tmp_srv_dir}/singbox" 2>&1)"; then
+      log_error "${sb_out}"
+      die "服务端配置未通过 sing-box check 校验！"
+    fi
+    if grep -Eiq '(deprecated|warn)' <<< "${sb_out}"; then
+      log_error "${sb_out}"
+      die "服务端配置存在 sing-box 弃用或警告项！"
+    fi
+    log_info "服务端配置通过 sing-box check 校验（零弃用警告）。"
+  else
+    log_warn "本机未安装 sing-box，服务端配置已完成 JSON 结构校验（跳过 sing-box check）。"
+  fi
+
+  validate_nginx_rendered_config "${tmp_srv_dir}"
+
+  # 3. 在隔离临时目录校验当前 .env 下的全部 4 种客户端配置（若无活跃订阅则注入临时探测订阅）
+  cp "${ENV_FILE}" "${tmp_priv_dir}/.env"
+  chmod 600 "${tmp_priv_dir}/.env"
+
+  if [[ -z "$(list_subscriptions)" ]]; then
+    local probe_uuid probe_tok
+    probe_uuid="$(generate_uuid)"
+    probe_tok="$(generate_sub_token)"
+    SSCTL_ENV_FILE="${tmp_priv_dir}/.env" env_file_apply_batch "${tmp_priv_dir}/.env" \
+      'SET:SUBSCRIPTIONS="check-probe"' \
+      "SET:UUID_CHECK_PROBE=${probe_uuid}" \
+      "SET:SUB_TOKEN_CHECK_PROBE=${probe_tok}"
+  fi
+
+  SSCTL_PRIVATE_DIR="${tmp_priv_dir}" SSCTL_ENV_FILE="${tmp_priv_dir}/.env" SSCTL_SINGBOX_BIN="${sb_bin}" \
+    bash "${REPO_ROOT}/scripts/50-gen-clients.sh" --local-only
+
+  for f in "${tmp_priv_dir}"/out/*/sing-box.json; do
+    jq empty "${f}"
+  done
+
+  for f in "${tmp_priv_dir}"/out/*/mihomo.yaml "${tmp_priv_dir}"/out/*/shadowrocket.conf; do
+    assert_no_unreplaced_placeholders "${f}"
+  done
+
+  for f in "${tmp_priv_dir}"/out/*/v2ray; do
+    local decoded
+    decoded="$(base64 -d < "${f}")"
+    if [[ "${decoded}" != vless://* ]]; then
+      die "Base64 节点订阅解码内容异常: ${f}"
+    fi
+  done
+
+  rm -rf "${tmp_srv_dir}" "${tmp_priv_dir}"
+  log_info "ssctl check 全部校验通过！"
+}
+
+check_cert_status() {
+  local cert_file="/etc/ssctl/cert/fullchain.pem"
+  local end_raw=""
+
+  if [[ -r "${cert_file}" ]] && command -v openssl >/dev/null 2>&1; then
+    end_raw="$(openssl x509 -in "${cert_file}" -noout -enddate 2>/dev/null || true)"
+  elif command -v openssl >/dev/null 2>&1 && [[ -r "${ENV_FILE}" ]]; then
+    load_env
+    if [[ -n "${REALITY_HANDSHAKE_PORT:-}" && -n "${SERVER_DOMAIN:-}" ]]; then
+      end_raw="$(openssl s_client -connect "127.0.0.1:${REALITY_HANDSHAKE_PORT}" -servername "${SERVER_DOMAIN}" </dev/null 2>/dev/null \
+        | openssl x509 -noout -enddate 2>/dev/null || true)"
+    fi
+  fi
+
+  if [[ -z "${end_raw}" ]]; then
+    log_warn "未能读取 TLS 证书到期时间（建议使用 'sudo ./ssctl status' 检查 ${cert_file}）。"
+    return 0
+  fi
+
+  local end_date="${end_raw#notAfter=}"
+  local exp_epoch="" now_epoch=""
+  exp_epoch="$(date -d "${end_date}" +%s 2>/dev/null || true)"
+  now_epoch="$(date +%s)"
+
+  if [[ -z "${exp_epoch}" ]]; then
+    log_info "TLS 证书到期时间: ${end_date}"
+    return 0
+  fi
+
+  local days_left=$(( (exp_epoch - now_epoch) / 86400 ))
+  if (( days_left < 0 )); then
+    log_error "TLS 证书已过期 $(( -days_left )) 天 (到期时间: ${end_date})！回落站点将暴露异常特征，请立即检查 CF_API_TOKEN 并运行 'sudo ./ssctl renew'！"
+    return 1
+  elif (( days_left < 20 )); then
+    log_warn "TLS 证书剩余有效期不足 20 天：仅剩 ${days_left} 天 (${end_date})！自动续期可能已失败，请检查 CF_API_TOKEN 并运行 'sudo ./ssctl renew'。"
+  else
+    log_info "TLS 证书状态正常：剩余 ${days_left} 天到期 (${end_date})。"
+  fi
+}
+
+cmd_status() {
+  assert_no_args "status" "$@"
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    log_warn "当前未以 root 权限运行，可能无法查看完整服务日志与磁盘证书；建议使用: sudo ./ssctl status"
+  fi
+  local svc_rc=0 cert_rc=0
+  local -a units=("sing-box" "nginx")
+  if [[ -f "/etc/systemd/system/ssctl-vless-guard.service" ]] || systemctl is-active --quiet ssctl-vless-guard.service 2>/dev/null; then
+    units+=("ssctl-vless-guard")
+  fi
+  if [[ -f "/etc/systemd/system/ssctl-hy2-hop.service" ]] || systemctl is-active --quiet ssctl-hy2-hop.service 2>/dev/null; then
+    units+=("ssctl-hy2-hop")
+  fi
+  systemctl status "${units[@]}" --no-pager || svc_rc=$?
+  echo ""
+  check_cert_status || cert_rc=$?
+  if (( svc_rc != 0 )); then
+    return "${svc_rc}"
+  fi
+  return "${cert_rc}"
+}
+
+cmd_logs() {
+  assert_no_args "logs" "$@"
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    log_warn "当前未以 root 权限运行，普通用户通常无法读取 systemd 服务日志；若输出为空请使用: sudo ./ssctl logs"
+  fi
+  journalctl -u sing-box -u nginx -f
+}
+
+cmd_restart() {
+  assert_no_args "restart" "$@"
+  require_root
+  acquire_ssctl_lock
+  systemctl restart nginx sing-box
+  if ! systemctl is-active --quiet nginx || ! systemctl is-active --quiet sing-box; then
+    die "重启后 Nginx 或 sing-box 未处于 active 状态，请运行 'sudo ./ssctl status' 与 'sudo ./ssctl logs' 排查！"
+  fi
+  if [[ -f "/etc/systemd/system/ssctl-vless-guard.service" ]] && systemctl is-enabled --quiet ssctl-vless-guard.service 2>/dev/null; then
+    systemctl restart ssctl-vless-guard.service
+  fi
+  if [[ -f "/etc/systemd/system/ssctl-hy2-hop.service" ]] && systemctl is-enabled --quiet ssctl-hy2-hop.service 2>/dev/null; then
+    systemctl restart ssctl-hy2-hop.service
+  fi
+  log_info "Nginx 与 sing-box 已重启并通过活跃状态校验。"
+}
+
+cmd_renew() {
+  assert_no_args "renew" "$@"
+  require_root
+  acquire_ssctl_lock
+  bash "${REPO_ROOT}/scripts/30-cert.sh" --force
+}
+
+cmd_upgrade() {
+  local raw_ver="${1:-}"
+  [[ -n "${raw_ver}" ]] || die "用法: sudo ./ssctl upgrade <version>"
+  if (( $# > 1 )); then
+    die "多余的参数: $2（用法: sudo ./ssctl upgrade <version>）"
+  fi
+
+  local target_ver="${raw_ver#v}"
+  if ! is_valid_semver "${target_ver}"; then
+    die "目标版本格式非法（须形如 x.y.z 或 vx.y.z）: ${raw_ver}"
+  fi
+
+  if [[ "${SSCTL_ALLOW_NONROOT_UPGRADE_TEST:-false}" != "true" ]]; then
+    require_root
+  fi
+  acquire_ssctl_lock
+  load_env
+
+  local old_env_ver="${SINGBOX_VERSION:-}"
+  local old_bin_ver="" old_bin_path=""
+  if command -v sing-box >/dev/null 2>&1; then
+    old_bin_path="$(command -v sing-box)"
+    old_bin_ver="$(sing-box version 2>/dev/null | awk '/^sing-box version/ {print $3}' || true)"
+  fi
+
+  local singbox_etc_dir="/etc/sing-box"
+  local snap_dir stage_dir had_etc="false"
+  make_temp_dir snap_dir
+  make_temp_dir stage_dir
+  save_local_snapshot "${snap_dir}"
+  if [[ -n "${old_bin_path}" && -f "${old_bin_path}" ]]; then
+    cp -a "${old_bin_path}" "${snap_dir}/sing-box.bin"
+  fi
+  if [[ -d "${singbox_etc_dir}" && -r "${singbox_etc_dir}" ]]; then
+    cp -a "${singbox_etc_dir}" "${snap_dir}/singbox-etc"
+    had_etc="true"
+  fi
+
+  log_info "开始执行 sing-box 版本升级/切换: ${old_env_ver:-?} (当前二进制: ${old_bin_ver:-未安装}) -> ${target_ver}"
+
+  local upgrade_ok="true"
+  # 1. 先在隔离目录暂存候选版本 deb 与二进制（不替换运行中二进制、不重启旧配置）
+  if ! ( bash "${REPO_ROOT}/scripts/40-deploy-server.sh" --stage-singbox "${target_ver}" "${stage_dir}" ); then
+    upgrade_ok="false"
+  fi
+
+  # 2. 更新版本号并用暂存的目标版本二进制（独立子进程完整启用 set -e）离线校验服务端与客户端渲染配置
+  if [[ "${upgrade_ok}" == "true" ]]; then
+    env_file_set_var "SINGBOX_VERSION" "${target_ver}" "${ENV_FILE}"
+    load_env
+    if ! SSCTL_SINGBOX_BIN="${stage_dir}/rootfs/usr/bin/sing-box" bash "${REPO_ROOT}/ssctl" check; then
+      upgrade_ok="false"
+    fi
+  fi
+
+  # 3. 校验全部通过后，安装暂存二进制并原子更新服务端与公网订阅
+  if [[ "${upgrade_ok}" == "true" ]]; then
+    if [[ "${SSCTL_ALLOW_NONROOT_UPGRADE_TEST:-false}" == "true" ]]; then
+      if ! ( SSCTL_SINGBOX_BIN="${stage_dir}/rootfs/usr/bin/sing-box" SSCTL_DEFER_RELEASE_PRUNE=true bash "${REPO_ROOT}/scripts/50-gen-clients.sh" ); then
+        upgrade_ok="false"
+      fi
+    elif is_server_deployed; then
+      if ! ( SSCTL_DEFER_RELEASE_PRUNE=true bash "${REPO_ROOT}/scripts/40-deploy-server.sh" --upgrade-singbox "${stage_dir}/sing-box.deb" ); then
+        upgrade_ok="false"
+      fi
+    else
+      if ! ( bash "${REPO_ROOT}/scripts/40-deploy-server.sh" --upgrade-singbox "${stage_dir}/sing-box.deb" ); then
+        upgrade_ok="false"
+      fi
+    fi
+  fi
+
+  if [[ "${upgrade_ok}" != "true" ]]; then
+    log_error "升级至 sing-box ${target_ver} 失败，正在从快照回滚配置、软链与二进制版本..."
+    local rb_ok="true"
+    restore_local_snapshot "${snap_dir}" || rb_ok="false"
+    restore_sub_web_snapshot "${snap_dir}" || rb_ok="false"
+    if [[ "${had_etc}" == "true" && "${EUID:-$(id -u)}" -eq 0 ]]; then
+      if ! rm -rf -- "${singbox_etc_dir}" || ! cp -a "${snap_dir}/singbox-etc" "${singbox_etc_dir}"; then
+        rb_ok="false"
+      fi
+    fi
+    if ! ( load_env ); then
+      rb_ok="false"
+    else
+      load_env
+    fi
+
+    if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${old_bin_ver}" ]]; then
+      local cur_bin_ver=""
+      if command -v sing-box >/dev/null 2>&1; then
+        cur_bin_ver="$(sing-box version 2>/dev/null | awk '/^sing-box version/ {print $3}' || true)"
+      fi
+      if [[ "${cur_bin_ver}" != "${old_bin_ver}" ]]; then
+        log_info "正在将 sing-box 二进制版本回滚至 ${old_bin_ver}..."
+        bash "${REPO_ROOT}/scripts/40-deploy-server.sh" --install-singbox-version "${old_bin_ver}" || true
+        cur_bin_ver=""
+        if command -v sing-box >/dev/null 2>&1; then
+          cur_bin_ver="$(sing-box version 2>/dev/null | awk '/^sing-box version/ {print $3}' || true)"
+        fi
+        if [[ "${cur_bin_ver}" != "${old_bin_ver}" && -f "${snap_dir}/sing-box.bin" ]]; then
+          log_warn "包管理器未能降级至 ${old_bin_ver}，正在从物理快照直接还原 sing-box 二进制..."
+          if ! install -m 755 -o root -g root "${snap_dir}/sing-box.bin" "${old_bin_path:-/usr/bin/sing-box}"; then
+            rb_ok="false"
+          fi
+          if command -v apt-mark >/dev/null 2>&1; then
+            apt-mark hold sing-box >/dev/null 2>&1 || true
+          fi
+        fi
+        cur_bin_ver="$(sing-box version 2>/dev/null | awk '/^sing-box version/ {print $3}' || true)"
+        if [[ "${cur_bin_ver}" != "${old_bin_ver}" ]]; then
+          log_error "回滚异常：无法将 sing-box 二进制恢复至 ${old_bin_ver}（当前: ${cur_bin_ver:-?}）！"
+          rb_ok="false"
+        fi
+      fi
+    fi
+    if is_server_deployed; then
+      if ! systemctl restart sing-box || ! systemctl is-active --quiet sing-box; then
+        log_error "回滚异常：恢复旧版本后重启 sing-box 失败！"
+        rb_ok="false"
+      fi
+    fi
+    if [[ "${rb_ok}" != "true" ]]; then
+      die "严重错误：sing-box 升级至 ${target_ver} 失败，且回滚过程中发生异常！请立即检查系统状态。"
+    fi
+    die "sing-box 升级至 ${target_ver} 失败，已完整回滚至升级前状态 (${old_env_ver:-?})。"
+  fi
+
+  if [[ "${EUID:-$(id -u)}" -eq 0 || -n "${SSCTL_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
+    bash "${REPO_ROOT}/scripts/50-gen-clients.sh" --finalize-releases
+  fi
+  log_info "sing-box 已成功升级/同步至版本 ${target_ver}！"
+}
+
+collect_ssctl_ufw_rules_to_delete() {
+  awk '
+    /# ssctl-(vless-reality|hy2|hy2-hop)([[:space:]]|$)/ && $1 ~ /^[0-9]+(:[0-9]+)?\/(tcp|udp)$/ {
+      print $1
+    }
+  ' | sort -u
+}
+
+cmd_uninstall() {
+  local purge_cert="false"
+  while (( $# > 0 )); do
+    case "$1" in
+      --purge-cert)
+        purge_cert="true"
+        shift
+        ;;
+      *)
+        die "未知选项: $1（用法: sudo ./ssctl uninstall [--purge-cert]）"
+        ;;
+    esac
+  done
+
+  require_root
+  acquire_ssctl_lock
+  if [[ -f "${ENV_FILE}" ]]; then
+    load_env
+  fi
+
+  log_info "开始卸载 ssctl 服务端组件（保留 ${PRIVATE_DIR}/ 目录）..."
+
+  # 1. 停止并禁用 systemd 服务，移除覆盖配置与版本锁定
+  local override_dir="/etc/systemd/system/sing-box.service.d"
+  local ng_override_dir="/etc/systemd/system/nginx.service.d"
+  local guard_unit="/etc/systemd/system/ssctl-vless-guard.service"
+  local guard_nft="/etc/ssctl/vless-guard.nft"
+  local hy2_unit="/etc/systemd/system/ssctl-hy2-hop.service"
+  local hy2_nft="/etc/ssctl/hy2-hop.nft"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now sing-box >/dev/null 2>&1 || true
+    systemctl disable --now ssctl-vless-guard.service >/dev/null 2>&1 || true
+    systemctl disable --now ssctl-hy2-hop.service >/dev/null 2>&1 || true
+  fi
+  rm -f "${override_dir}/override.conf" "${ng_override_dir}/ssctl.conf" "${guard_unit}" "${guard_nft}" "${hy2_unit}" "${hy2_nft}"
+  rmdir "${override_dir}" "${ng_override_dir}" 2>/dev/null || true
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  if command -v apt-mark >/dev/null 2>&1; then
+    apt-mark unhold sing-box >/dev/null 2>&1 || true
+  fi
+
+  # 2. 移除服务端 sing-box 配置、Nginx 回落站点/调优项与公网静态订阅目录
+  local singbox_etc="/etc/sing-box"
+  local nginx_avail="/etc/nginx/sites-available/ssctl-reality.conf"
+  local nginx_en="/etc/nginx/sites-enabled/ssctl-reality.conf"
+  local nginx_tuning="/etc/nginx/modules-enabled/99-ssctl-tuning.conf"
+  local nginx_main="/etc/nginx/nginx.conf"
+  local web_root="/var/www/ssctl-site"
+  local sub_web_base="/var/lib/ssctl"
+
+  rm -f "${singbox_etc}"/*.json 2>/dev/null || true
+  rmdir "${singbox_etc}" 2>/dev/null || true
+  rm -f "${nginx_en}" "${nginx_avail}" "${nginx_tuning}"
+  if [[ -f "${nginx_main}" ]] && grep -Fq '# ssctl-tuned-from-768' "${nginx_main}"; then
+    sed -i -E 's/^([[:space:]]*)worker_connections[[:space:]]+[0-9]+;[[:space:]]*#[[:space:]]*ssctl-tuned-from-768$/\1worker_connections 768;/' "${nginx_main}"
+  fi
+  rm -rf "${web_root}" "${web_root}.ssctl-new" "${web_root}.ssctl-old" "${sub_web_base}"
+
+  if command -v nginx >/dev/null 2>&1; then
+    if systemctl is-active --quiet nginx 2>/dev/null && nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx >/dev/null 2>&1 || true
+    fi
+  fi
+
+  # 3. 清理 nftables 保护/端口跳跃表与 UFW 代理放行规则（严格保留 ssctl-preserve-ssh）
+  if command -v nft >/dev/null 2>&1; then
+    if nft list table inet ssctl_guard >/dev/null 2>&1; then
+      nft delete table inet ssctl_guard >/dev/null 2>&1 || true
+      log_info "已移除 nftables 连接保护表 (inet ssctl_guard)。"
+    fi
+    if nft list table inet ssctl_hy2 >/dev/null 2>&1; then
+      nft delete table inet ssctl_hy2 >/dev/null 2>&1 || true
+      log_info "已移除 nftables 端口跳跃表 (inet ssctl_hy2)。"
+    fi
+  fi
+
+  if command -v ufw >/dev/null 2>&1; then
+    local -A active_ssh_tcp=()
+    local sp
+    while IFS= read -r sp; do
+      [[ -n "${sp}" ]] && active_ssh_tcp["${sp}/tcp"]=1
+    done < <(detect_active_ssh_ports)
+    local rule_spec
+    while IFS= read -r rule_spec; do
+      [[ -z "${rule_spec}" ]] && continue
+      if [[ -n "${active_ssh_tcp[${rule_spec}]:-}" ]]; then
+        log_warn "跳过删除当前活跃 SSH 监听端口对应的 UFW 规则: ${rule_spec}"
+        continue
+      fi
+      ufw delete allow "${rule_spec}" >/dev/null 2>&1 || true
+      log_info "已移除 UFW 放行规则: ${rule_spec}"
+    done < <(ufw status 2>/dev/null | collect_ssctl_ufw_rules_to_delete || true)
+  fi
+
+  # 4. 清理内核调优配置、journald 限额、遗留文件与证书重载钩子（默认保留证书，支持 --purge-cert 彻底删除）
+  rm -f \
+    "/etc/ssctl/ssh_port" \
+    "/etc/sysctl.d/99-ssctl.conf" \
+    "/etc/security/limits.d/99-ssctl.conf" \
+    "/etc/modules-load.d/ssctl-bbr.conf" \
+    "/etc/systemd/journald.conf.d/99-ssctl.conf" \
+    "/usr/local/libexec/ssctl-cert-reload"
+  rmdir "/etc/systemd/journald.conf.d" 2>/dev/null || true
+
+  if command -v sysctl >/dev/null 2>&1; then
+    sysctl --system >/dev/null 2>&1 || true
+  fi
+
+  local cert_dir="/etc/ssctl/cert"
+  if [[ "${purge_cert}" == "true" ]]; then
+    if [[ -n "${SERVER_DOMAIN:-}" && -x "/root/.acme.sh/acme.sh" ]]; then
+      env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND HOME="/root" \
+        /root/.acme.sh/acme.sh --home "/root/.acme.sh" --remove -d "${SERVER_DOMAIN}" --ecc >/dev/null 2>&1 || true
+    fi
+    rm -rf "${cert_dir}"
+    rmdir "/etc/ssctl" 2>/dev/null || true
+    log_info "已按 --purge-cert 清理 TLS 证书目录 (${cert_dir})。"
+  else
+    rmdir "/etc/ssctl" 2>/dev/null || true
+    if [[ -d "${cert_dir}" ]]; then
+      log_info "已保留 TLS 证书 (${cert_dir}) 以免重新部署触发 Let's Encrypt 速率限制；如需彻底删除可加 '--purge-cert'。"
+    fi
+  fi
+
+  log_info "卸载完成！私有配置与客户端备份已完整保留于: ${PRIVATE_DIR}/"
+}
+
+main() {
+  local subcmd="${1:-help}"
+  shift || true
+
+  if [[ "${subcmd}" != "help" && "${subcmd}" != "--help" && "${subcmd}" != "-h" ]] && has_help_flag "$@"; then
+    print_command_help "${subcmd}"
+    return $?
+  fi
+
+  case "${subcmd}" in
+    init)
+      cmd_init "$@"
+      ;;
+    deploy)
+      cmd_deploy "$@"
+      ;;
+    add)
+      cmd_add "$@"
+      ;;
+    list)
+      cmd_list "$@"
+      ;;
+    show)
+      cmd_show "$@"
+      ;;
+    reset)
+      cmd_reset "$@"
+      ;;
+    del)
+      cmd_del "$@"
+      ;;
+    flush)
+      bash "${REPO_ROOT}/scripts/50-gen-clients.sh" "$@"
+      ;;
+    check)
+      cmd_check "$@"
+      ;;
+    status)
+      cmd_status "$@"
+      ;;
+    logs)
+      cmd_logs "$@"
+      ;;
+    restart)
+      cmd_restart "$@"
+      ;;
+    renew)
+      cmd_renew "$@"
+      ;;
+    upgrade)
+      cmd_upgrade "$@"
+      ;;
+    uninstall)
+      cmd_uninstall "$@"
+      ;;
+    help|--help|-h)
+      cmd_help "$@"
+      ;;
+    *)
+      log_error "未知子命令: ${subcmd}"
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

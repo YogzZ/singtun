@@ -1,0 +1,12 @@
+{
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "dns-local"
+      }
+    ],
+    "final": "dns-local",
+    "strategy": "ipv4_only"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-reality-in",
+      "listen": "0.0.0.0",
+      "listen_port": 443,
+      "users": [],
+      "tls": {
+        "enabled": true,
+        "server_name": "node.example.com",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "127.0.0.1",
+            "server_port": 8443
+          },
+          "private_key": "",
+          "short_id": [
+            ""
+          ],
+          "max_time_difference": "2m"
+        }
+      }
+    }
+  ]
+}

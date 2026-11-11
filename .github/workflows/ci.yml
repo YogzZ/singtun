@@ -1,0 +1,1205 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install dependencies (shellcheck, jq, qrencode, nginx, openssl, gnupg)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck jq qrencode nginx openssl gnupg curl ca-certificates
+
+      - name: Run ShellCheck
+        run: |
+          shellcheck -x ssctl scripts/*.sh scripts/lib/*.sh scripts/hooks/*.sh
+
+      - name: Install native git hooks and run private leak check
+        run: |
+          bash scripts/hooks/install-hooks.sh
+          test -x .git/hooks/pre-commit
+          test -x .git/hooks/commit-msg
+          bash scripts/hooks/check-private-leak.sh
+
+      - name: Verify pure-data .env parser, key allowlist, quote handling, and .env.bak preservation
+        run: |
+          (
+            set -euo pipefail
+            TD="$(mktemp -d)"
+            EF="${TD}/.env"
+            cp examples/env.example "${EF}"
+            chmod 600 "${EF}"
+            export SSCTL_PRIVATE_DIR="${TD}" SSCTL_ENV_FILE="${EF}"
+            source scripts/lib/common.sh
+
+            # 1. 支持 export 前缀、双引号含 &/; URL、单引号 '\'' 拼接，且 SET 去重规范化、DEL 清除 export 行
+            printf '\nexport TELEGRAM_BOT_TOKEN="12345:AA_bb?x=1&y=2;z=3"\n' >> "${EF}"
+            RAW_TOK="tok'end"
+            ESCAPED_TOK="'${RAW_TOK//\'/\'\\\'\'}'"
+            env_file_set_var "CF_API_TOKEN" "${ESCAPED_TOK}" "${EF}"
+            env_file_set_var "RULESET_SR_CN_DOMAIN" '"https://example.com/direct.txt?a=1&b=2;fmt=txt"' "${EF}"
+            load_env
+            test "${TELEGRAM_BOT_TOKEN}" = "12345:AA_bb?x=1&y=2;z=3"
+            test "${CF_API_TOKEN}" = "tok'end"
+            test "${RULESET_SR_CN_DOMAIN}" = "https://example.com/direct.txt?a=1&b=2;fmt=txt"
+            env_file_has_key "TELEGRAM_BOT_TOKEN" "${EF}"
+            env_file_set_var "TELEGRAM_BOT_TOKEN" "updated_tok" "${EF}"
+            test "$(grep -Ec 'TELEGRAM_BOT_TOKEN=' "${EF}")" -eq 1
+            if grep -Eq '^export[[:space:]]+TELEGRAM_BOT_TOKEN=' "${EF}"; then exit 1; fi
+            env_file_del_var "TELEGRAM_BOT_TOKEN" "${EF}"
+            if env_file_has_key "TELEGRAM_BOT_TOKEN" "${EF}"; then exit 1; fi
+
+            # 2. 候选校验失败时原文件与 .env.bak 必须零改动
+            cp -a "${EF}" "${TD}/orig.env"
+            cp -a "${EF}.bak" "${TD}/orig.env.bak"
+            for bad_op in \
+              'SET:PATH=/tmp/evil' \
+              'SET:LD_PRELOAD=/tmp/evil.so' \
+              'SET:BASH_ENV=/tmp/evil.sh' \
+              'SET:UNKNOWN_CUSTOM_VAR=1' \
+              'SET:CF_API_TOKEN=$(id)' \
+              'SET:CF_API_TOKEN="$(id)"' \
+              'SET:CF_API_TOKEN=`id`'; do
+              if ( env_file_apply_batch "${EF}" "${bad_op}" ) 2>/dev/null; then
+                echo "ERROR: dangerous .env op unexpectedly succeeded: ${bad_op}" >&2
+                exit 1
+              fi
+              diff -u "${TD}/orig.env" "${EF}"
+              diff -u "${TD}/orig.env.bak" "${EF}.bak"
+            done
+
+            # 3. 拦截同名重复键
+            printf 'VLESS_PORT=8443\n' >> "${EF}"
+            if ( validate_env_data_file "${EF}" true ) 2>/dev/null; then
+              echo "ERROR: duplicate key in .env unexpectedly passed!" >&2
+              exit 1
+            fi
+            rm -rf "${TD}"
+          )
+
+      - name: Verify SagerNet APT GPG key pinning, multi-key rejection, and clean re-export
+        run: |
+          TD="$(mktemp -d)"
+          chmod 700 "${TD}"
+          curl -fsSL https://sing-box.app/gpg.key -o "${TD}/sagernet.asc"
+
+          # 1. 正向校验与净化导出
+          bash scripts/40-deploy-server.sh --verify-gpg-only "${TD}/sagernet.asc"
+          bash scripts/40-deploy-server.sh --export-clean-gpg "${TD}/sagernet.asc" "${TD}/ok.asc"
+
+          # 2. 负向断言：指纹不匹配必须拒绝
+          if SSCTL_SAGERNET_GPG_FPR_OVERRIDE="0000000000000000000000000000000000000000" \
+            bash scripts/40-deploy-server.sh --verify-gpg-only "${TD}/sagernet.asc"; then
+            echo "ERROR: mismatched SagerNet GPG fingerprint unexpectedly passed!" >&2
+            exit 1
+          fi
+
+          # 构造附加攻击者公钥的测试样本
+          mkdir -p "${TD}/attacker"
+          chmod 700 "${TD}/attacker"
+          gpg --batch --no-tty --homedir "${TD}/attacker" --import "${TD}/sagernet.asc" >/dev/null 2>&1
+          gpg --batch --yes --pinentry-mode loopback --passphrase "" --homedir "${TD}/attacker" \
+            --quick-generate-key "Attacker <attacker@example.com>" ed25519 cert never >/dev/null 2>&1
+          gpg --batch --no-tty --homedir "${TD}/attacker" --armor --export > "${TD}/bundle.asc"
+          gpg --batch --no-tty --homedir "${TD}/attacker" --export > "${TD}/bundle.gpg"
+          gpg --batch --no-tty --homedir "${TD}/attacker" --armor --export "Attacker <attacker@example.com>" > "${TD}/att.asc"
+          cat "${TD}/sagernet.asc" "${TD}/att.asc" > "${TD}/two-blocks.asc"
+          gpgconf --homedir "${TD}/attacker" --kill all >/dev/null 2>&1 || true
+
+          # 3. 负向断言：单块多钥 (bundle.asc) 与二进制多钥 (bundle.gpg) 必须校验失败
+          for bad in "${TD}/bundle.asc" "${TD}/bundle.gpg"; do
+            if bash scripts/40-deploy-server.sh --verify-gpg-only "${bad}"; then
+              echo "ERROR: multi-key bundle ${bad} unexpectedly passed verification!" >&2
+              exit 1
+            fi
+          done
+
+          # 4. 双独立块净化断言 (two-blocks.asc)：最终导出 keyring 仅含 1 把官方主公钥
+          bash scripts/40-deploy-server.sh --export-clean-gpg "${TD}/two-blocks.asc" "${TD}/clean.asc"
+          test "$(grep -c '^-----BEGIN PGP PUBLIC KEY BLOCK-----' "${TD}/clean.asc")" -eq 1
+          COLONS="$(gpg --batch --no-tty --with-colons --show-keys "${TD}/clean.asc")"
+          test "$(echo "${COLONS}" | awk -F: '$1 == "pub" {c++} END {print c+0}')" -eq 1
+          FPR="$(echo "${COLONS}" | awk -F: '$1 == "pub" {p=1; next} p && $1 == "fpr" {print toupper($10); exit}')"
+          test "${FPR}" = "2C317FBD5D886B4E89BAE8DA6D9152172A2B2F0C"
+          rm -rf "${TD}"
+
+      - name: Test OpenSSL REALITY keypair fallback (without sing-box installed)
+        run: |
+          SSCTL_PRIVATE_DIR=/tmp/ci-openssl-init ./ssctl init
+          sed -i 's|^CF_API_TOKEN=.*|CF_API_TOKEN=dummy_ci_token_for_validation|' /tmp/ci-openssl-init/.env
+
+      - name: Download, verify SHA256, and install pinned sing-box & mihomo
+        run: |
+          SINGBOX_VERSION="$(awk -F= '/^SINGBOX_VERSION=/ {print $2}' examples/env.example | awk '{print $1}')"
+          DEB_NAME="sing-box_${SINGBOX_VERSION}_linux_amd64.deb"
+          BASE_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}"
+          curl -fsSL "${BASE_URL}/${DEB_NAME}" -o "/tmp/${DEB_NAME}"
+
+          bash scripts/40-deploy-server.sh --verify-deb-only "/tmp/${DEB_NAME}" "${SINGBOX_VERSION}" "amd64"
+          cp "/tmp/${DEB_NAME}" "/tmp/${DEB_NAME}.tampered"
+          printf 'x' >> "/tmp/${DEB_NAME}.tampered"
+          if bash scripts/40-deploy-server.sh --verify-deb-only "/tmp/${DEB_NAME}.tampered" "${SINGBOX_VERSION}" "amd64"; then
+            echo "ERROR: tampered sing-box deb unexpectedly passed verification!" >&2
+            exit 1
+          fi
+          rm -f "/tmp/${DEB_NAME}.tampered"
+          sudo dpkg -i "/tmp/${DEB_NAME}"
+          sing-box version
+
+          # 下载并强制校验固定版本官方 mihomo 内核（含篡改负向测试）
+          MIHOMO_VER="v1.19.33"
+          MIHOMO_GZ="mihomo-linux-amd64-compatible-${MIHOMO_VER}.gz"
+          curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VER}/${MIHOMO_GZ}" -o "/tmp/${MIHOMO_GZ}"
+          bash scripts/50-gen-clients.sh --verify-mihomo-gz-only "/tmp/${MIHOMO_GZ}" "${MIHOMO_VER}" "amd64"
+          cp "/tmp/${MIHOMO_GZ}" "/tmp/${MIHOMO_GZ}.tampered"
+          printf 'x' >> "/tmp/${MIHOMO_GZ}.tampered"
+          if bash scripts/50-gen-clients.sh --verify-mihomo-gz-only "/tmp/${MIHOMO_GZ}.tampered" "${MIHOMO_VER}" "amd64"; then
+            echo "ERROR: tampered mihomo archive unexpectedly passed verification!" >&2
+            exit 1
+          fi
+          rm -f "/tmp/${MIHOMO_GZ}.tampered"
+          gzip -dc "/tmp/${MIHOMO_GZ}" > /tmp/mihomo-bin
+          chmod 755 /tmp/mihomo-bin
+          /tmp/mihomo-bin -v
+
+          # 预取官方 .mrs 规则集供离线 mihomo -t 校验加载
+          mkdir -p /tmp/mihomo-workdir/rules
+          curl -fsSL https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.mrs -o /tmp/mihomo-workdir/rules/geosite-cn.mrs
+          curl -fsSL https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/cn.mrs -o /tmp/mihomo-workdir/rules/geoip-cn.mrs
+
+      - name: Validate OpenSSL-generated REALITY config (zero subscriptions standby)
+        run: |
+          SSCTL_PRIVATE_DIR=/tmp/ci-openssl-init ./ssctl check
+          rm -rf /tmp/ci-openssl-init
+
+      - name: Validate full subscription lifecycle, symlink publish, mihomo -t, and leak guards
+        run: |
+          SUB_WEB="/tmp/ci-sub-web"
+          ./ssctl init
+          sed -i 's|^CF_API_TOKEN=.*|CF_API_TOKEN=dummy_ci_token_for_validation|' private/.env
+
+          # 0. 帮助命令、保留字与孤立变量冲突拦截测试
+          ./ssctl help >/dev/null
+          ./ssctl help add >/dev/null
+          ./ssctl flush --help >/dev/null
+          if ./ssctl help unknown-cmd; then
+            echo "ERROR: help for unknown command unexpectedly succeeded!" >&2
+            exit 1
+          fi
+          if SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./ssctl add reset; then
+            echo "ERROR: reserved subscription name 'reset' unexpectedly succeeded!" >&2
+            exit 1
+          fi
+          printf '\nUUID_ORPHAN=11111111-2222-3333-4444-555555555555\n' >> private/.env
+          if SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./ssctl add orphan; then
+            echo "ERROR: orphan UUID collision unexpectedly succeeded!" >&2
+            exit 1
+          fi
+          sed -i '/^UUID_ORPHAN=/d' private/.env
+
+          # 1. 创建自动编号订阅 (sub-1) 与命名订阅 (laptop)
+          SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./ssctl add
+          SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./ssctl add laptop --qr v2ray >/dev/null
+          ./ssctl list
+          ./ssctl show laptop >/dev/null
+
+          # 2. 防泄漏拦截 SUB_PATH_PREFIX、SUB_TOKEN_* 与 Base64 节点密文负向断言
+          PFX="$(awk -F= '/^SUB_PATH_PREFIX=/ {print $2}' private/.env)"
+          TOK_OLD="$(awk -F= '/^SUB_TOKEN_LAPTOP=/ {print $2}' private/.env)"
+          UUID_OLD="$(awk -F= '/^UUID_LAPTOP=/ {print $2}' private/.env)"
+          B64_V2RAY="$(cat private/out/laptop/v2ray)"
+          MSG_LEAK="$(mktemp)"
+          printf 'leak token %s\n' "${TOK_OLD}" > "${MSG_LEAK}"
+          if bash scripts/hooks/check-private-leak.sh --commit-msg "${MSG_LEAK}"; then
+            echo "ERROR: leaked SUB_TOKEN was not blocked!" >&2
+            exit 1
+          fi
+          printf 'leak prefix %s\n' "${PFX}" > "${MSG_LEAK}"
+          if bash scripts/hooks/check-private-leak.sh --commit-msg "${MSG_LEAK}"; then
+            echo "ERROR: leaked SUB_PATH_PREFIX was not blocked!" >&2
+            exit 1
+          fi
+          printf 'leak b64 %s\n' "${B64_V2RAY}" > "${MSG_LEAK}"
+          if bash scripts/hooks/check-private-leak.sh --commit-msg "${MSG_LEAK}"; then
+            echo "ERROR: leaked Base64 v2ray payload was not blocked!" >&2
+            exit 1
+          fi
+          SUB_DEEP_LINK="$(awk -F'= ' '/^shadowrocket_sub[[:space:]]*=/ {print $2}' private/out/laptop/urls.txt | cut -d'#' -f1)"
+          printf 'leak sub link %s\n' "${SUB_DEEP_LINK}" > "${MSG_LEAK}"
+          if bash scripts/hooks/check-private-leak.sh --commit-msg "${MSG_LEAK}"; then
+            echo "ERROR: leaked sub:// Base64 deep link was not blocked!" >&2
+            exit 1
+          fi
+          rm -f "${MSG_LEAK}"
+
+          # 3. 覆盖 SERVER_IPV6=false / true 校验 sing-box check (零弃用警告) 与真实 mihomo -t
+          for ipv6_mode in false true; do
+            echo "=== Testing SERVER_IPV6=${ipv6_mode} ==="
+            sed -i "s|^SERVER_IPV6=.*|SERVER_IPV6=${ipv6_mode}|" private/.env
+            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir ./ssctl check
+            SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+              SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+              ./ssctl flush
+            for cfg in private/out/*/sing-box.json; do
+              out="$(sing-box check -c "${cfg}" 2>&1)"
+              if echo "${out}" | grep -Eiq '(deprecated|warn)'; then
+                echo "ERROR: deprecation warning found in ${cfg}: ${out}" >&2
+                exit 1
+              fi
+            done
+            for mcfg in private/out/*/mihomo.yaml; do
+              /tmp/mihomo-bin -d /tmp/mihomo-workdir -t -f "${mcfg}"
+            done
+          done
+          sed -i "s|^SERVER_IPV6=.*|SERVER_IPV6=false|" private/.env
+          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./ssctl flush
+
+          # 4. 校验跨三端策略语义、加密 IP-DoH、无明文 UDP 53、IPv6 拒绝与海外 QUIC 拦截顺序
+          jq -e '.inbounds[0].stack == "mixed"' private/out/laptop/sing-box.json >/dev/null
+          jq -e 'all(.dns.servers[]; .type == "https") and .dns.servers[1].server == "223.5.5.5"' private/out/laptop/sing-box.json >/dev/null
+          jq -e '.dns.rules[0].domain == ["node.example.com"] and .dns.rules[1].clash_mode == "direct" and .dns.rules[2].clash_mode == "global"' private/out/laptop/sing-box.json >/dev/null
+          jq -e 'any(.route.rules[]; .domain == ["node.example.com"] and .outbound == "direct")' private/out/laptop/sing-box.json >/dev/null
+          jq -e 'any(.route.rules[]; .ip_cidr == ["203.0.113.10/32"] and .outbound == "direct")' private/out/laptop/sing-box.json >/dev/null
+          jq -e 'any(.route.rules[]; ((.ip_cidr // []) | index("100.64.0.0/10") != null) and .outbound == "direct")' private/out/laptop/sing-box.json >/dev/null
+          jq -e 'any(.route.rules[]; ((.ip_cidr // []) | index("169.254.0.0/16") != null) and .outbound == "direct")' private/out/laptop/sing-box.json >/dev/null
+          jq -e 'any(.route.rules[]; .ip_version == 6 and .action == "reject")' private/out/laptop/sing-box.json >/dev/null
+          jq -e '
+            (.route.rules | map(.protocol // "") | index("bittorrent")) < (.route.rules | map(.clash_mode // "") | indices("global")[0])
+            and any(.route.rules[]; .clash_mode == "global" and .network == "udp" and .port == 443 and .action == "reject")
+            and ((.route.rules | map((.rule_set // []) | index("geosite-cn") != null) | index(true)) < (.route.rules | map(.network == "udp" and .port == 443 and .action == "reject" and ((.clash_mode // "") == "")) | index(true)))
+            and .route.final == "proxy"
+          ' private/out/laptop/sing-box.json >/dev/null
+
+          grep -Fxq 'find-process-mode: off' private/out/laptop/mihomo.yaml
+          grep -Fxq 'ipv6: true' private/out/laptop/mihomo.yaml
+          grep -Fxq '  strict-route: true' private/out/laptop/mihomo.yaml
+          grep -Fxq '    - fdfe:dcba:9876::1/126' private/out/laptop/mihomo.yaml
+          grep -Fxq '    - "+.push.apple.com"' private/out/laptop/mihomo.yaml
+          grep -Fxq '    - "https://223.5.5.5/dns-query"' private/out/laptop/mihomo.yaml
+          ! grep -Fxq '    - "223.5.5.5"' private/out/laptop/mihomo.yaml
+          grep -Fxq '  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve' private/out/laptop/mihomo.yaml
+          grep -Fxq '  - IP-CIDR6,::/0,REJECT,no-resolve' private/out/laptop/mihomo.yaml
+          grep -Fxq '  - DOMAIN,node.example.com,DIRECT' private/out/laptop/mihomo.yaml
+          awk '
+            /RULE-SET,geoip-cn,DIRECT/ { cn=NR }
+            /AND,\(\(NETWORK,UDP\),\(DST-PORT,443\)\),REJECT/ { quic=NR }
+            /MATCH,PROXY/ { fin=NR }
+            END { if (!cn || !quic || !fin || !(cn < quic && quic < fin)) exit 1 }
+          ' private/out/laptop/mihomo.yaml
+
+          grep -Fq '*.ls.apple.com' private/out/laptop/shadowrocket.conf
+          grep -Fq '*.lan' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'hijack-dns = *:53' private/out/laptop/shadowrocket.conf
+          grep -Fxq "update-url = https://node.example.com/${PFX}/${TOK_OLD}/shadowrocket.conf" private/out/laptop/shadowrocket.conf
+          grep -Fxq 'IP-CIDR,100.64.0.0/10,DIRECT,no-resolve' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'IP-CIDR6,::/0,REJECT,no-resolve' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'DOMAIN,node.example.com,DIRECT' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'DOMAIN-SUFFIX,weather-data.apple.com,DIRECT' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'DOMAIN-SUFFIX,wechatpay.cn,DIRECT' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'baidu.com = server:https://223.5.5.5/dns-query' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'weather-data.apple.com = server:https://223.5.5.5/dns-query' private/out/laptop/shadowrocket.conf
+          ! grep -Eq 'server:[0-9]' private/out/laptop/shadowrocket.conf
+          awk '
+            /^DOMAIN-SUFFIX,meituan\.net,DIRECT$/ { seen_suffix=NR }
+            /^DOMAIN-SET,/ { seen_set=NR }
+            /^GEOIP,CN,DIRECT,no-resolve$/ { seen_geoip=NR }
+            /^PROTOCOL,QUIC,REJECT$/ { seen_quic=NR }
+            /^FINAL,PROXY,dns-failed$/ { seen_final=NR }
+            END {
+              if (!seen_suffix || !seen_set || !seen_geoip || !seen_quic || !seen_final) exit 1
+              if (!(seen_suffix < seen_set && seen_set < seen_geoip && seen_geoip < seen_quic && seen_quic < seen_final)) exit 1
+            }
+          ' private/out/laptop/shadowrocket.conf
+
+          # 4.2 校验 IP-DoH 静态白名单拦截与 HY2_HOP_PORTS 本地 UDP 监听冲突拦截
+          sed -i 's|^DNS_DIRECT=.*|DNS_DIRECT=114.114.114.114|' private/.env
+          if ./ssctl check 2>/dev/null; then
+            echo "ERROR: non-whitelisted DNS_DIRECT unexpectedly passed!" >&2
+            exit 1
+          fi
+          sed -i 's|^DNS_DIRECT=.*|DNS_DIRECT=223.5.5.5|' private/.env
+          sed -i 's|^DNS_REMOTE=.*|DNS_REMOTE=208.67.222.222|' private/.env
+          if ./ssctl check 2>/dev/null; then
+            echo "ERROR: non-whitelisted DNS_REMOTE unexpectedly passed!" >&2
+            exit 1
+          fi
+          sed -i 's|^DNS_REMOTE=.*|DNS_REMOTE=1.1.1.1|' private/.env
+          sed -i 's|^RULESET_GEOSITE_CN=.*|RULESET_GEOSITE_CN=http://example.com/geosite-cn.srs|' private/.env
+          if ./ssctl check 2>/dev/null; then
+            echo "ERROR: non-HTTPS RULESET_GEOSITE_CN unexpectedly passed!" >&2
+            exit 1
+          fi
+          sed -i 's|^RULESET_GEOSITE_CN=.*|RULESET_GEOSITE_CN=https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs|' private/.env
+          MUTABLE_WARN_OUT="$(./ssctl check 2>&1)"
+          grep -Fq "RULESET_GEOSITE_CN" <<< "${MUTABLE_WARN_OUT}"
+          sed -i 's|^RULESET_GEOSITE_CN=.*|RULESET_GEOSITE_CN=https://raw.githubusercontent.com/SagerNet/sing-geosite/23066e3b0833d1484916637dde2b5bae80178045/geosite-cn.srs|' private/.env
+          IMMUTABLE_OUT="$(./ssctl check 2>&1)"
+          ! grep -Fq "RULESET_" <<< "${IMMUTABLE_OUT}"
+          sed -i 's|^ACME_NOTIFY_HOOK=.*|ACME_NOTIFY_HOOK=../evil|' private/.env
+          if ./ssctl check 2>/dev/null; then
+            echo "ERROR: path-traversal ACME_NOTIFY_HOOK unexpectedly passed!" >&2
+            exit 1
+          fi
+          sed -i 's|^ACME_NOTIFY_HOOK=.*|ACME_NOTIFY_HOOK=|' private/.env
+
+          python3 - <<'PY'
+          import os, shutil, socket, subprocess, tempfile
+          s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+          s.bind(("127.0.0.1", 0))
+          uport = s.getsockname()[1]
+          td = tempfile.mkdtemp()
+          try:
+              ef = os.path.join(td, ".env")
+              shutil.copyfile("private/.env", ef)
+              os.chmod(ef, 0o600)
+              env = os.environ.copy()
+              env.update({"SSCTL_PRIVATE_DIR": td, "SSCTL_ENV_FILE": ef, "SKIP_OS_CHECK": "true", "SKIP_DNS_CHECK": "true"})
+              subprocess.check_call([
+                  "bash", "-c",
+                  'source scripts/lib/common.sh && env_file_apply_batch "$SSCTL_ENV_FILE" '
+                  f'"SET:ENABLE_HY2=true" "SET:HY2_PORT=8443" "SET:HY2_HOP_PORTS={max(1,uport-5)}-{min(65535,uport+5)}"'
+              ], env=env)
+              rc = subprocess.call(["bash", "scripts/00-preflight.sh"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              assert rc != 0, f"UDP conflict on port {uport} in HY2_HOP_PORTS was not rejected!"
+          finally:
+              s.close()
+              shutil.rmtree(td, ignore_errors=True)
+          PY
+
+          if ./ssctl flush --invalid-flag; then
+            echo "ERROR: flush with unknown flag unexpectedly succeeded!" >&2
+            exit 1
+          fi
+          if ./ssctl flush sub-1 laptop; then
+            echo "ERROR: flush with extra positional arg unexpectedly succeeded!" >&2
+            exit 1
+          fi
+          rm -f private/out/sub-1/sing-box.json
+          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./ssctl flush laptop
+          test -f private/out/sub-1/sing-box.json
+
+          # 4.5 校验订阅事务回滚（覆盖渲染失败、软链切换后故障注入 SSCTL_FAIL_AFTER_SUB_WEB_SWITCH=true 及关闭订阅分支保护）
+          SNAP_VERIFY="$(mktemp -d)"
+          cp -a private/.env "${SNAP_VERIFY}/env"
+          cp -a private/.env.bak "${SNAP_VERIFY}/env.bak"
+          cp -a private/out "${SNAP_VERIFY}/out"
+          ORIG_LINK_TARGET="$(readlink "${SUB_WEB}/sub-web")"
+          for bad_cmd in "add fail-sub" "reset laptop" "del laptop"; do
+            # (a) 渲染校验失败回滚
+            # shellcheck disable=SC2086
+            if SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+              SSCTL_MIHOMO_BIN=/bin/false SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+              ./ssctl ${bad_cmd}; then
+              echo "ERROR: '${bad_cmd}' unexpectedly succeeded under injected mihomo failure!" >&2
+              exit 1
+            fi
+            diff -u "${SNAP_VERIFY}/env" private/.env
+            diff -u "${SNAP_VERIFY}/env.bak" private/.env.bak
+            diff -ru "${SNAP_VERIFY}/out" private/out
+            test "$(readlink "${SUB_WEB}/sub-web")" = "${ORIG_LINK_TARGET}"
+
+            # (b) 软链原子切换后故障注入回滚（验证直接切回原发布目录且无断链）
+            # shellcheck disable=SC2086
+            if SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+              SSCTL_FAIL_AFTER_SUB_WEB_SWITCH=true \
+              SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+              ./ssctl ${bad_cmd}; then
+              echo "ERROR: '${bad_cmd}' unexpectedly succeeded under post-switch failure!" >&2
+              exit 1
+            fi
+            diff -u "${SNAP_VERIFY}/env" private/.env
+            diff -u "${SNAP_VERIFY}/env.bak" private/.env.bak
+            diff -ru "${SNAP_VERIFY}/out" private/out
+            test "$(readlink "${SUB_WEB}/sub-web")" = "${ORIG_LINK_TARGET}"
+            test -f "${SUB_WEB}/sub-web/${PFX}/${TOK_OLD}/mihomo.yaml"
+          done
+
+          # (c) ENABLE_SUBSCRIPTION=false 分支：事务期移除软链后触发故障，断言旧版本目录未被提前删除且原软链完整恢复不断链
+          sed -i 's|^ENABLE_SUBSCRIPTION=.*|ENABLE_SUBSCRIPTION=false|' private/.env
+          if SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SSCTL_FAIL_AFTER_SUB_SYNC=true \
+            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./ssctl add fail-off; then
+            echo "ERROR: 'add fail-off' unexpectedly succeeded under SSCTL_FAIL_AFTER_SUB_SYNC!" >&2
+            exit 1
+          fi
+          sed -i 's|^ENABLE_SUBSCRIPTION=.*|ENABLE_SUBSCRIPTION=true|' private/.env
+          test -L "${SUB_WEB}/sub-web"
+          test "$(readlink "${SUB_WEB}/sub-web")" = "${ORIG_LINK_TARGET}"
+          test -f "${SUB_WEB}/sub-web/${PFX}/${TOK_OLD}/mihomo.yaml"
+          cp -a "${SNAP_VERIFY}/env" private/.env
+          cp -a "${SNAP_VERIFY}/env.bak" private/.env.bak
+          chmod 600 private/.env private/.env.bak
+          rm -rf "${SNAP_VERIFY}"
+
+          # 4.6 校验 ssctl upgrade 先暂存候选二进制预检（坏候选版本在替换运行中二进制前即被拦截并回滚）
+          FAKE_DEB_DIR="$(mktemp -d)"
+          mkdir -p "${FAKE_DEB_DIR}/pkg/DEBIAN" "${FAKE_DEB_DIR}/pkg/usr/bin"
+          chmod 755 "${FAKE_DEB_DIR}" "${FAKE_DEB_DIR}/pkg" "${FAKE_DEB_DIR}/pkg/DEBIAN" "${FAKE_DEB_DIR}/pkg/usr/bin"
+          cat > "${FAKE_DEB_DIR}/pkg/DEBIAN/control" <<'EOF'
+          Package: sing-box
+          Version: 99.0.0
+          Section: net
+          Priority: optional
+          Architecture: amd64
+          Maintainer: test <test@example.com>
+          Description: Fake candidate sing-box for precheck rollback test
+          EOF
+          sed -i 's/^[[:space:]]*//' "${FAKE_DEB_DIR}/pkg/DEBIAN/control"
+          cat > "${FAKE_DEB_DIR}/pkg/usr/bin/sing-box" <<'EOF'
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "version" ]]; then
+            echo "sing-box version 99.0.0"
+            exit 0
+          fi
+          echo "FATAL[0000] incompatible config in candidate 99.0.0" >&2
+          exit 1
+          EOF
+          sed -i 's/^[[:space:]]*//' "${FAKE_DEB_DIR}/pkg/usr/bin/sing-box"
+          chmod 755 "${FAKE_DEB_DIR}/pkg/usr/bin/sing-box"
+          dpkg-deb --build "${FAKE_DEB_DIR}/pkg" "${FAKE_DEB_DIR}/sing-box_99.0.0_linux_amd64.deb" >/dev/null
+          FAKE_SHA="$(sha256sum "${FAKE_DEB_DIR}/sing-box_99.0.0_linux_amd64.deb" | awk '{print $1}')"
+          cp -a private/.env "${FAKE_DEB_DIR}/before_env"
+          sed -i "s|^SINGBOX_DEB_SHA256_AMD64=.*|SINGBOX_DEB_SHA256_AMD64=${FAKE_SHA}|" private/.env
+          cp -a private/.env "${FAKE_DEB_DIR}/pre_upgrade_env"
+          cp -a private/.env.bak "${FAKE_DEB_DIR}/pre_upgrade_env.bak"
+          if UPG_OUT="$(SSCTL_ALLOW_NONROOT_UPGRADE_TEST=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SSCTL_STAGE_DEB_PATH_OVERRIDE="${FAKE_DEB_DIR}/sing-box_99.0.0_linux_amd64.deb" \
+            ./ssctl upgrade 99.0.0 2>&1)"; then
+            echo "ERROR: upgrade to incompatible candidate 99.0.0 unexpectedly succeeded!" >&2
+            exit 1
+          fi
+          grep -Fq "incompatible config in candidate 99.0.0" <<< "${UPG_OUT}"
+          diff -u "${FAKE_DEB_DIR}/pre_upgrade_env" private/.env
+          diff -u "${FAKE_DEB_DIR}/pre_upgrade_env.bak" private/.env.bak
+          cp -a "${FAKE_DEB_DIR}/before_env" private/.env
+          chmod 600 private/.env
+          rm -rf "${FAKE_DEB_DIR}"
+
+          # 5. 校验符号链接发布、版本保留上限 (<=2) 与 reset 同时更换 UUID + Token 且清除旧 Token 路径
+          test -L "${SUB_WEB}/sub-web"
+          test -f "${SUB_WEB}/sub-web/${PFX}/${TOK_OLD}/mihomo.yaml"
+          SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./ssctl reset laptop >/dev/null
+          TOK_NEW="$(awk -F= '/^SUB_TOKEN_LAPTOP=/ {print $2}' private/.env)"
+          UUID_NEW="$(awk -F= '/^UUID_LAPTOP=/ {print $2}' private/.env)"
+          test "${TOK_NEW}" != "${TOK_OLD}"
+          test "${UUID_NEW}" != "${UUID_OLD}"
+          test ! -e "${SUB_WEB}/sub-web/${PFX}/${TOK_OLD}"
+          test -f "${SUB_WEB}/sub-web/${PFX}/${TOK_NEW}/mihomo.yaml"
+          grep -Fxq "update-url = https://node.example.com/${PFX}/${TOK_NEW}/shadowrocket.conf" private/out/laptop/shadowrocket.conf
+          test "$(find "${SUB_WEB}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 2
+
+          # 5.5 校验 Hysteria2 开关（含单端口、HY2_HOP_PORTS 端口跳跃、v2 实例密钥混入派生密码、HY2_OBFS salamander 混淆、mihomo -t、双节点 Base64 与 reset 同步轮换）
+          sed -i 's|^ENABLE_HY2=.*|ENABLE_HY2=true|' private/.env
+          sed -i 's|^HY2_HOP_PORTS=.*|HY2_HOP_PORTS=20000-30000|' private/.env
+          SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir ./ssctl check
+          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./ssctl flush
+          jq -e '.outbounds[0].tag == "proxy" and .outbounds[0].default == "vless-out" and .outbounds[3].type == "hysteria2" and .outbounds[3].server_ports == ["20000:30000"] and (.outbounds[3] | has("obfs") | not)' private/out/laptop/sing-box.json >/dev/null
+          /tmp/mihomo-bin -d /tmp/mihomo-workdir -t -f private/out/laptop/mihomo.yaml
+          HY2_PASS_BEFORE="$(jq -r '.outbounds[3].password' private/out/laptop/sing-box.json)"
+          UUID_LAPTOP_CUR="$(awk -F= '/^UUID_LAPTOP=/ {print $2}' private/.env)"
+          HY2_PASS_LEGACY_V1="$(printf '%s:ssctl-hy2-v1' "${UUID_LAPTOP_CUR}" | sha256sum | awk '{print substr($1, 1, 32)}')"
+          test "${HY2_PASS_BEFORE}" != "${HY2_PASS_LEGACY_V1}"
+          for leaked_secret in "${HY2_PASS_BEFORE}" "${HY2_PASS_LEGACY_V1}"; do
+            MSG_HY2_LEAK="$(mktemp)"
+            printf 'leak hy2 password %s\n' "${leaked_secret}" > "${MSG_HY2_LEAK}"
+            if bash scripts/hooks/check-private-leak.sh --commit-msg "${MSG_HY2_LEAK}"; then
+              echo "ERROR: leaked Hysteria2 password (${leaked_secret}) was not blocked!" >&2
+              exit 1
+            fi
+            rm -f "${MSG_HY2_LEAK}"
+          done
+          # 验证开启 HY2_OBFS=true（服务端 20-inbound-hy2.json + 三端客户端 + check-private-leak 拦截 obfs 密码）
+          sed -i 's|^HY2_OBFS=.*|HY2_OBFS=true|' private/.env
+          SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir ./ssctl check
+          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./ssctl flush
+          jq -e '.outbounds[3].obfs.type == "salamander" and (.outbounds[3].obfs.password | length == 32)' private/out/laptop/sing-box.json >/dev/null
+          grep -Fxq '    obfs: salamander' private/out/laptop/mihomo.yaml
+          /tmp/mihomo-bin -d /tmp/mihomo-workdir -t -f private/out/laptop/mihomo.yaml
+          HY2_OBFS_PASS="$(jq -r '.outbounds[3].obfs.password' private/out/laptop/sing-box.json)"
+          base64 -d < private/out/laptop/v2ray | grep -Eq "^hysteria2://.*mport=20000-30000&obfs=salamander&obfs-password=${HY2_OBFS_PASS}#node\.example\.com-laptop-hy2$"
+          HY2_SRV_OUT="$(mktemp -d)"
+          mkdir -p "${HY2_SRV_OUT}/cert"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+            -keyout "${HY2_SRV_OUT}/cert/key.pem" -out "${HY2_SRV_OUT}/cert/fullchain.pem" \
+            -days 1 -nodes -subj "/CN=node.example.com" >/dev/null 2>&1
+          SSCTL_CERT_DIR_OVERRIDE="${HY2_SRV_OUT}/cert" SSCTL_WEB_ROOT_OVERRIDE="${HY2_SRV_OUT}/www" \
+            bash scripts/40-deploy-server.sh --render-only "${HY2_SRV_OUT}" >/dev/null
+          jq -e ".inbounds[0].obfs.type == \"salamander\" and .inbounds[0].obfs.password == \"${HY2_OBFS_PASS}\"" "${HY2_SRV_OUT}/singbox/20-inbound-hy2.json" >/dev/null
+          sing-box check -C "${HY2_SRV_OUT}/singbox"
+          rm -rf "${HY2_SRV_OUT}"
+          MSG_OBFS_LEAK="$(mktemp)"
+          printf 'leak hy2 obfs %s\n' "${HY2_OBFS_PASS}" > "${MSG_OBFS_LEAK}"
+          if bash scripts/hooks/check-private-leak.sh --commit-msg "${MSG_OBFS_LEAK}"; then
+            echo "ERROR: leaked Hysteria2 obfs password was not blocked!" >&2
+            exit 1
+          fi
+          rm -f "${MSG_OBFS_LEAK}"
+          sed -i 's|^HY2_OBFS=.*|HY2_OBFS=false|' private/.env
+          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./ssctl flush
+          sed -i 's|^HY2_UP_MBPS=.*|HY2_UP_MBPS=100|' private/.env
+          if ./ssctl flush --local-only; then
+            echo "ERROR: unpaired HY2_UP_MBPS unexpectedly succeeded in flush!" >&2
+            exit 1
+          fi
+          sed -i 's|^HY2_UP_MBPS=.*|HY2_UP_MBPS=|' private/.env
+          test "$(base64 -d < private/out/laptop/v2ray | wc -l)" -eq 2
+          base64 -d < private/out/laptop/v2ray | grep -Eq '^hysteria2://.*mport=20000-30000#node\.example\.com-laptop-hy2$'
+          SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./ssctl reset laptop --qr hy2 >/dev/null
+          HY2_PASS_AFTER="$(jq -r '.outbounds[3].password' private/out/laptop/sing-box.json)"
+          test "${HY2_PASS_AFTER}" != "${HY2_PASS_BEFORE}"
+          sed -i 's|^HY2_HOP_PORTS=.*|HY2_HOP_PORTS=|' private/.env
+          sed -i 's|^ENABLE_HY2=.*|ENABLE_HY2=false|' private/.env
+
+          # 6. 校验 ENABLE_SUBSCRIPTION=false 清空软链与发布目录、SINGBOX_CLIENT_COMPAT=1.12 兼容模式
+          sed -i 's|^ENABLE_SUBSCRIPTION=.*|ENABLE_SUBSCRIPTION=false|' private/.env
+          ./ssctl check
+          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./ssctl flush
+          test ! -e "${SUB_WEB}/sub-web"
+          test "$(find "${SUB_WEB}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 0
+          ! grep -Eq '^update-url[[:space:]]*=' private/out/laptop/shadowrocket.conf
+          sed -i 's|^ENABLE_SUBSCRIPTION=.*|ENABLE_SUBSCRIPTION=true|' private/.env
+
+          sed -i 's|^SINGBOX_CLIENT_COMPAT=.*|SINGBOX_CLIENT_COMPAT=1.12|' private/.env
+          ./ssctl check
+          jq -e '(. | has("http_clients") | not) and .route.rule_set[0].download_detour == "proxy"' private/out/laptop/sing-box.json >/dev/null || {
+            ./ssctl flush --local-only
+            jq -e '(. | has("http_clients") | not) and .route.rule_set[0].download_detour == "proxy"' private/out/laptop/sing-box.json >/dev/null
+          }
+          sed -i 's|^SINGBOX_CLIENT_COMPAT=.*|SINGBOX_CLIENT_COMPAT=1.14|' private/.env
+
+          # 7. 校验 del 删除与旧目录安全保护及 upgrade / uninstall 参数校验
+          mkdir -p private/out/BAD_NAME
+          touch private/out/keep.txt
+          SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./ssctl del sub-1
+          SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./ssctl del laptop
+          test ! -e private/out/sub-1
+          test ! -e private/out/laptop
+          test -d private/out/BAD_NAME
+          test -f private/out/keep.txt
+          rm -rf "${SUB_WEB}" private/out/BAD_NAME private/out/keep.txt
+
+          if ./ssctl upgrade not-a-version; then
+            echo "ERROR: upgrade with invalid semver unexpectedly succeeded!" >&2
+            exit 1
+          fi
+          if ./ssctl uninstall --unknown-flag; then
+            echo "ERROR: uninstall with unknown flag unexpectedly succeeded!" >&2
+            exit 1
+          fi
+
+      - name: Render fallback site across many domains and verify server route anti-rebind (static + runtime)
+        run: |
+          mkdir -p private/www
+          touch private/www/.gitkeep
+          gitkeep_out="$(mktemp -d)"
+          bash scripts/40-deploy-server.sh --render-only "${gitkeep_out}" >/dev/null
+          test -f "${gitkeep_out}/www/index.html"
+          test ! -e "${gitkeep_out}/www/.gitkeep"
+          rm -rf "${gitkeep_out}"
+
+          # 校验 private/www 软链穿越拦截（00-preflight 与 40-deploy-server 双重拒绝）
+          ln -s /etc/hosts private/www/evil-link
+          if ./ssctl check 2>/dev/null; then
+            echo "ERROR: symlink inside private/www unexpectedly passed preflight!" >&2
+            exit 1
+          fi
+          sym_out="$(mktemp -d)"
+          if bash scripts/40-deploy-server.sh --render-only "${sym_out}" 2>/dev/null; then
+            echo "ERROR: symlink inside private/www unexpectedly passed 40-deploy-server!" >&2
+            exit 1
+          fi
+          rm -rf "${sym_out}" private/www
+
+          seen_layouts=""
+          for i in $(seq 1 30); do
+            sed -i "s|^SERVER_DOMAIN=.*|SERVER_DOMAIN=host${i}.example.com|" private/.env
+            out="$(mktemp -d)"
+            bash scripts/40-deploy-server.sh --render-only "${out}" >/dev/null
+            if grep -Eq '__[A-Z0-9_]+__' "${out}/www/index.html"; then
+              echo "ERROR: unreplaced placeholder for host${i}.example.com" >&2
+              exit 1
+            fi
+            if grep -Fq '· rev ' "${out}/www/index.html"; then
+              echo "ERROR: legacy rev hash fingerprint leaked for host${i}.example.com" >&2
+              exit 1
+            fi
+            raw_domain_hash="$(printf '%s' "host${i}.example.com" | sha256sum | awk '{print substr($1, 7, 8)}')"
+            if grep -Fq "${raw_domain_hash}" "${out}/www/index.html"; then
+              echo "ERROR: unkeyed domain hash leaked for host${i}.example.com" >&2
+              exit 1
+            fi
+            grep -q '<main>' "${out}/www/index.html" && seen_layouts="${seen_layouts}A"
+            grep -q '<article>' "${out}/www/index.html" && seen_layouts="${seen_layouts}B"
+            grep -q '<dl>' "${out}/www/index.html" && seen_layouts="${seen_layouts}C"
+            grep -q '<footer><span>' "${out}/www/index.html" && seen_layouts="${seen_layouts}D"
+            if [[ "${i}" -eq 1 ]]; then
+              # 验证同域名下更换实例密钥会产生不同的多态 HTML
+              ORIG_KEY_LINE="$(grep '^REALITY_PRIVATE_KEY=' private/.env)"
+              ALT_KP="$(sing-box generate reality-keypair)"
+              ALT_PRIV="$(awk '/PrivateKey/ {print $2}' <<< "${ALT_KP}")"
+              sed -i "s|^REALITY_PRIVATE_KEY=.*|REALITY_PRIVATE_KEY=${ALT_PRIV}|" private/.env
+              alt_out="$(mktemp -d)"
+              bash scripts/40-deploy-server.sh --render-only "${alt_out}" >/dev/null
+              if cmp -s "${out}/www/index.html" "${alt_out}/www/index.html"; then
+                echo "ERROR: fallback site did not vary across different REALITY_PRIVATE_KEY!" >&2
+                exit 1
+              fi
+              rm -rf "${alt_out}"
+              sed -i "s|^REALITY_PRIVATE_KEY=.*|${ORIG_KEY_LINE}|" private/.env
+
+              jq -e '.log.level == "warn"' "${out}/singbox/00-log.json" >/dev/null
+              jq -e '.inbounds[0].tls.reality.max_time_difference == "2m"' "${out}/singbox/10-inbound-vless.json" >/dev/null
+              jq -e '
+                any(.route.rules[]; (.domain // []) | index("ip6-localhost") != null)
+                and any(.route.rules[]; .network == "tcp" and .port == 25 and .action == "reject")
+                and any(.route.rules[]; (.port // []) == [135, 445, 6969] and (.port_range | not) and .action == "reject")
+                and any(.route.rules[]; (.port_range // []) == ["137:139", "6881:6889"] and (.port | not) and .action == "reject")
+                and any(.route.rules[]; .protocol == "bittorrent" and .action == "reject")
+                and any(.route.rules[]; ((.ip_cidr // []) | index("203.0.113.10/32") != null) and .action == "reject")
+                and any(.route.rules[]; ((.ip_cidr // []) | index("100.64.0.0/10") != null) and .action == "reject")
+                and any(.route.rules[]; ((.ip_cidr // []) | index("::ffff:0:0/96") != null) and .action == "reject")
+                and ((.route.rules | map(.port // 0) | index(25)) < (.route.rules | map(.action // "") | index("resolve")))
+                and ((.route.rules | map((.port == [135, 445, 6969])) | index(true)) < (.route.rules | map(.action // "") | index("resolve")))
+                and ((.route.rules | map((.port_range // []) | length > 0) | index(true)) < (.route.rules | map(.action // "") | index("resolve")))
+                and ((.route.rules | map(.protocol // "") | index("bittorrent")) < (.route.rules | map(.action // "") | index("resolve")))
+                and ((.route.rules | map(.action // "") | index("resolve")) < (.route.rules | map(.ip_is_private // false) | index(true)))
+              ' "${out}/singbox/90-route.json" >/dev/null
+            fi
+            rm -rf "${out}"
+          done
+          grep -q 'A' <<< "${seen_layouts}"
+          grep -q 'B' <<< "${seen_layouts}"
+          grep -q 'C' <<< "${seen_layouts}"
+          grep -q 'D' <<< "${seen_layouts}"
+
+      - name: Verify 4-category SSRF and DNS Rebinding protection (A/B positive control, IPv6, router logs, mapped IPv4)
+        run: |
+          python3 - <<'PY'
+          import json, os, shutil, socket, struct, subprocess, tempfile, threading, time
+
+          td = tempfile.mkdtemp(prefix="ssrf4_")
+          try:
+              def free_port():
+                  with socket.socket() as s:
+                      s.bind(("127.0.0.1", 0))
+                      return s.getsockname()[1]
+
+              # SOCKS5 sink server recording every outbound dial target that passes sing-box routing
+              sink_port = free_port()
+              sink_hits = []
+              sink_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              sink_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+              sink_srv.bind(("127.0.0.1", sink_port))
+              sink_srv.listen(64)
+
+              def handle_sink(conn):
+                  try:
+                      conn.settimeout(2)
+                      hdr = conn.recv(3)
+                      if len(hdr) < 2:
+                          return
+                      conn.sendall(b"\x05\x00")
+                      req = conn.recv(4)
+                      if len(req) < 4:
+                          return
+                      atyp = req[3]
+                      if atyp == 1:
+                          dst = socket.inet_ntoa(conn.recv(4))
+                      elif atyp == 4:
+                          dst = socket.inet_ntop(socket.AF_INET6, conn.recv(16))
+                      elif atyp == 3:
+                          ln = conn.recv(1)[0]
+                          dst = conn.recv(ln).decode("latin1")
+                      else:
+                          return
+                      port = struct.unpack("!H", conn.recv(2))[0]
+                      sink_hits.append((dst, port))
+                      conn.sendall(b"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x50")
+                      _ = conn.recv(1024)
+                      conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nSINK_OK")
+                  except Exception:
+                      pass
+                  finally:
+                      conn.close()
+
+              def sink_loop():
+                  while True:
+                      try:
+                          c, _ = sink_srv.accept()
+                          threading.Thread(target=handle_sink, args=(c,), daemon=True).start()
+                      except Exception:
+                          break
+              threading.Thread(target=sink_loop, daemon=True).start()
+
+              # Real loopback TCP listener for true direct-outbound verification on 127.0.0.1
+              loop_port = free_port()
+              loop_hits = []
+              loop_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              loop_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+              loop_srv.bind(("127.0.0.1", loop_port))
+              loop_srv.listen(16)
+              def loop_accept():
+                  while True:
+                      try:
+                          c, _ = loop_srv.accept()
+                          loop_hits.append(1)
+                          _ = c.recv(512)
+                          c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nLOOP_OK")
+                          c.close()
+                      except Exception:
+                          break
+              threading.Thread(target=loop_accept, daemon=True).start()
+
+              def render_route(ipv6_enabled):
+                  pdir = os.path.join(td, f"priv_{ipv6_enabled}")
+                  os.makedirs(pdir, exist_ok=True)
+                  ef = os.path.join(pdir, ".env")
+                  shutil.copyfile("examples/env.example", ef)
+                  os.chmod(ef, 0o600)
+                  kp = subprocess.check_output(["sing-box", "generate", "reality-keypair"], text=True)
+                  pk = [l.split(":", 1)[1].strip() for l in kp.splitlines() if "PrivateKey" in l][0]
+                  pub = [l.split(":", 1)[1].strip() for l in kp.splitlines() if "PublicKey" in l][0]
+                  env = os.environ.copy()
+                  env.update({
+                      "SSCTL_PRIVATE_DIR": pdir,
+                      "SSCTL_ENV_FILE": ef,
+                      "SSCTL_SELF_IPV6_OVERRIDE": "2001:db8::10",
+                  })
+                  subprocess.check_call([
+                      "bash", "-c",
+                      'source scripts/lib/common.sh && env_file_apply_batch "$SSCTL_ENV_FILE" '
+                      f'"SET:SERVER_IPV6={"true" if ipv6_enabled else "false"}" '
+                      f'"SET:REALITY_PRIVATE_KEY={pk}" "SET:REALITY_PUBLIC_KEY={pub}" '
+                      '"SET:REALITY_SHORT_ID=0123456789abcdef" "SET:SUB_PATH_PREFIX=p0123456789abcde"'
+                  ], env=env)
+                  odir = os.path.join(td, f"srv_{ipv6_enabled}")
+                  subprocess.check_call(["bash", "scripts/40-deploy-server.sh", "--render-only", odir], env=env, stdout=subprocess.DEVNULL)
+                  with open(os.path.join(odir, "singbox/90-route.json")) as f:
+                      return json.load(f)
+
+              hosts_map = {
+                  "ok4.example.com": "198.51.100.42",
+                  "rebind-loop.example.com": "127.0.0.1",
+                  "rebind-rfc1918.example.com": "10.0.0.1",
+                  "rebind-cgnat.example.com": "100.64.0.1",
+                  "rebind-meta.example.com": "169.254.169.254",
+                  "rebind-self.example.com": "203.0.113.10",
+                  "ok6.example.com": "2001:db8::42",
+                  "rebind-ula.example.com": "fc00::1",
+                  "rebind-self6.example.com": "2001:db8::10",
+                  "rebind-map-loop.example.com": "::ffff:127.0.0.1",
+                  "rebind-map-cgnat.example.com": "::ffff:100.64.0.1",
+                  "rebind-map-self.example.com": "::ffff:203.0.113.10",
+              }
+
+              def start_sb(route_obj, strategy, use_real_direct=False, strip_ssrf=False):
+                  sp = free_port()
+                  log_path = os.path.join(td, f"sb_{sp}.log")
+                  rules = json.loads(json.dumps(route_obj["rules"]))
+                  if strip_ssrf:
+                      rules = [r for r in rules if r.get("action") == "resolve"]
+                  outbound = ({"type": "direct", "tag": "direct"} if use_real_direct
+                              else {"type": "socks", "tag": "direct", "server": "127.0.0.1", "server_port": sink_port})
+                  cfg = {
+                      "log": {"level": "debug", "output": log_path},
+                      "dns": {
+                          "servers": [{"type": "hosts", "tag": "dns-local", "predefined": hosts_map}],
+                          "final": "dns-local",
+                          "strategy": strategy,
+                      },
+                      "inbounds": [{"type": "socks", "tag": "in", "listen": "127.0.0.1", "listen_port": sp}],
+                      "outbounds": [outbound],
+                      "route": {
+                          "rules": rules,
+                          "final": "direct",
+                          "default_domain_resolver": {"server": "dns-local", "strategy": strategy},
+                      },
+                  }
+                  cp = os.path.join(td, f"cfg_{sp}.json")
+                  with open(cp, "w") as f:
+                      json.dump(cfg, f)
+                  p = subprocess.Popen(["sing-box", "run", "-c", cp], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  time.sleep(0.45)
+                  return p, sp, log_path
+
+              def socks_req(sp, atyp, target, dport=8080):
+                  s = socket.create_connection(("127.0.0.1", sp), timeout=2.5)
+                  s.sendall(b"\x05\x01\x00")
+                  assert s.recv(2) == b"\x05\x00"
+                  if atyp == "v4":
+                      body = b"\x01" + socket.inet_aton(target)
+                  elif atyp == "v6":
+                      body = b"\x04" + socket.inet_pton(socket.AF_INET6, target)
+                  else:
+                      tb = target.encode()
+                      body = b"\x03" + bytes([len(tb)]) + tb
+                  s.sendall(b"\x05\x01\x00" + body + struct.pack("!H", dport))
+                  rep = s.recv(32)
+                  if len(rep) < 2 or rep[1] != 0:
+                      s.close()
+                      return ""
+                  s.sendall(b"GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
+                  data = b""
+                  try:
+                      while True:
+                          c = s.recv(2048)
+                          if not c:
+                              break
+                          data += c
+                  except Exception:
+                      pass
+                  s.close()
+                  return data.decode("latin1", "replace")
+
+              rt_v4 = render_route(False)["route"]
+              rt_v6 = render_route(True)["route"]
+
+              # Category A: IPv4 unicast targets — first prove every target returns 200 OK when SSRF rules are stripped
+              unicast_v4 = [
+                  ("v4", "127.0.0.1"), ("v4", "10.0.0.1"), ("v4", "172.16.0.1"), ("v4", "192.168.1.1"),
+                  ("v4", "100.64.0.1"), ("v4", "169.254.169.254"), ("v4", "192.0.0.1"), ("v4", "198.18.0.1"),
+                  ("v4", "203.0.113.10"), ("domain", "rebind-loop.example.com"), ("domain", "rebind-rfc1918.example.com"),
+                  ("domain", "rebind-cgnat.example.com"), ("domain", "rebind-meta.example.com"), ("domain", "rebind-self.example.com"),
+              ]
+              p_ctrl, sp_ctrl, _ = start_sb(rt_v4, "ipv4_only", strip_ssrf=True)
+              p_loop_ctrl, sp_loop_ctrl, _ = start_sb(rt_v4, "ipv4_only", use_real_direct=True, strip_ssrf=True)
+              try:
+                  assert "LOOP_OK" in socks_req(sp_loop_ctrl, "domain", "rebind-loop.example.com", loop_port)
+                  for atyp, tgt in unicast_v4:
+                      assert "200 OK" in socks_req(sp_ctrl, atyp, tgt), f"Control reachability failed for {tgt}"
+              finally:
+                  p_ctrl.terminate(); p_loop_ctrl.terminate()
+
+              sink_hits.clear(); loop_hits.clear()
+              p_enf4, sp_enf4, _ = start_sb(rt_v4, "ipv4_only", strip_ssrf=False)
+              p_loop_enf, sp_loop_enf, _ = start_sb(rt_v4, "ipv4_only", use_real_direct=True, strip_ssrf=False)
+              try:
+                  assert "SINK_OK" in socks_req(sp_enf4, "v4", "198.51.100.42")
+                  assert "SINK_OK" in socks_req(sp_enf4, "domain", "ok4.example.com")
+                  sink_hits.clear()
+                  for blocked_port in (25, 135, 137, 139, 445, 6881, 6889, 6969):
+                      assert socks_req(sp_enf4, "v4", "198.51.100.42", blocked_port) == "", f"Outbound port {blocked_port} leaked!"
+                  for blocked_dom in ("localhost", "ip6-localhost", "printer.local"):
+                      assert socks_req(sp_enf4, "domain", blocked_dom, 443) == "", f"Blocked domain {blocked_dom} leaked!"
+                  assert socks_req(sp_loop_enf, "domain", "rebind-loop.example.com", loop_port) == ""
+                  assert socks_req(sp_loop_enf, "domain", "localhost", loop_port) == ""
+                  assert len(loop_hits) == 0
+                  for atyp, tgt in unicast_v4:
+                      assert socks_req(sp_enf4, atyp, tgt) == "", f"Category A SSRF target bypassed: {tgt}"
+                  assert len(sink_hits) == 0, f"Unexpected sink hits in Category A: {sink_hits}"
+              finally:
+                  p_enf4.terminate(); p_loop_enf.terminate()
+
+              # Category B, C, D under SERVER_IPV6=true (no blanket ip_version:6 reject)
+              p_ctrl6, sp_ctrl6, _ = start_sb(rt_v6, "prefer_ipv4", strip_ssrf=True)
+              try:
+                  for atyp, tgt in [("v6", "::1"), ("v6", "fc00::1"), ("v6", "2001:db8::10"), ("domain", "rebind-ula.example.com")]:
+                      assert "200 OK" in socks_req(sp_ctrl6, atyp, tgt), f"IPv6 control failed for {tgt}"
+              finally:
+                  p_ctrl6.terminate()
+
+              p_enf6, sp_enf6, log6 = start_sb(rt_v6, "prefer_ipv4", strip_ssrf=False)
+              try:
+                  assert "SINK_OK" in socks_req(sp_enf6, "v6", "2001:db8::42")
+                  assert "SINK_OK" in socks_req(sp_enf6, "domain", "ok6.example.com")
+                  sink_hits.clear()
+
+                  # Category B: IPv6 special unicast + self IPv6 /128
+                  for atyp, tgt in [
+                      ("v6", "::1"), ("v6", "fc00::1"), ("v6", "fe80::1"), ("v6", "2001:db8::10"),
+                      ("domain", "ip6-localhost"), ("domain", "rebind-ula.example.com"), ("domain", "rebind-self6.example.com"),
+                  ]:
+                      assert socks_req(sp_enf6, atyp, tgt) == "", f"Category B IPv6 target bypassed: {tgt}"
+
+                  # Category C: Non-connectable multicast/unspecified/broadcast/discard/NAT64 -> verify explicit reject rule logs
+                  non_conn = [
+                      ("v4", "0.0.0.0"), ("v4", "0.0.0.1"), ("v4", "224.0.0.1"), ("v4", "240.0.0.1"), ("v4", "255.255.255.255"),
+                      ("v6", "::"), ("v6", "ff02::1"), ("v6", "100::1"), ("v6", "64:ff9b::7f00:1"), ("v6", "64:ff9b:1::1"),
+                  ]
+                  for atyp, tgt in non_conn:
+                      assert socks_req(sp_enf6, atyp, tgt) == "", f"Category C target bypassed: {tgt}"
+
+                  # Category D: IPv4-mapped IPv6 restricted targets via both SOCKS5 ATYP=IPv6 and AAAA records
+                  for atyp, tgt in [
+                      ("v6", "::ffff:127.0.0.1"), ("v6", "::ffff:100.64.0.1"), ("v6", "::ffff:203.0.113.10"),
+                      ("domain", "rebind-map-loop.example.com"), ("domain", "rebind-map-cgnat.example.com"), ("domain", "rebind-map-self.example.com"),
+                  ]:
+                      assert socks_req(sp_enf6, atyp, tgt) == "", f"Category D mapped IPv4 target bypassed: {tgt}"
+
+                  assert len(sink_hits) == 0, f"Unexpected sink hits in Categories B/C/D: {sink_hits}"
+                  time.sleep(0.2)
+                  with open(log6) as f:
+                      lg = f.read()
+                  reject_count = lg.count("reject")
+                  assert reject_count >= len(non_conn), f"Expected explicit router reject logs >= {len(non_conn)}, got {reject_count}"
+              finally:
+                  p_enf6.terminate()
+                  sink_srv.close()
+                  loop_srv.close()
+          finally:
+              shutil.rmtree(td, ignore_errors=True)
+          PY
+
+      - name: Verify 6-scenario REALITY and Nginx fallback integration (UUID layer vs TLS fallback)
+        run: |
+          python3 - <<'PY'
+          import json, os, re, shutil, socket, ssl, subprocess, tempfile, threading, time
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+
+          ver_out = subprocess.check_output(["nginx", "-v"], stderr=subprocess.STDOUT, text=True)
+          m = re.search(r"nginx/(\d+)\.(\d+)\.(\d+)", ver_out)
+          modes = ["false"]
+          if m and (int(m.group(1)), int(m.group(2)), int(m.group(3))) >= (1, 19, 4):
+              modes.insert(0, "true")
+
+          def free_port():
+              with socket.socket() as s:
+                  s.bind(("127.0.0.1", 0))
+                  return s.getsockname()[1]
+
+          for reject_mode in modes:
+              tmp = tempfile.mkdtemp(prefix=f"reality6_{reject_mode}_")
+              try:
+                  hs_port, vless_port, socks_port, bad_socks_port, target_port = [free_port() for _ in range(5)]
+                  hits = []
+                  class H(BaseHTTPRequestHandler):
+                      def do_GET(self):
+                          hits.append(self.path)
+                          self.send_response(200)
+                          self.end_headers()
+                          self.wfile.write(b"TARGET_OK")
+                      def log_message(self, *a):
+                          pass
+                  httpd = HTTPServer(("127.0.0.1", target_port), H)
+                  threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+                  kp = subprocess.check_output(["sing-box", "generate", "reality-keypair"], text=True)
+                  priv_key = [l.split(":", 1)[1].strip() for l in kp.splitlines() if "PrivateKey" in l][0]
+                  pub_key = [l.split(":", 1)[1].strip() for l in kp.splitlines() if "PublicKey" in l][0]
+                  good_uuid = subprocess.check_output(["sing-box", "generate", "uuid"], text=True).strip()
+                  bad_uuid = subprocess.check_output(["sing-box", "generate", "uuid"], text=True).strip()
+
+                  priv_dir = os.path.join(tmp, "private")
+                  os.makedirs(priv_dir)
+                  env_path = os.path.join(priv_dir, ".env")
+                  shutil.copyfile("examples/env.example", env_path)
+                  os.chmod(env_path, 0o600)
+
+                  cert_dir = os.path.join(tmp, "cert")
+                  os.makedirs(cert_dir)
+                  subprocess.check_call([
+                      "openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                      "-keyout", f"{cert_dir}/key.pem", "-out", f"{cert_dir}/fullchain.pem",
+                      "-days", "1", "-nodes", "-subj", "/CN=node.example.com",
+                      "-addext", "subjectAltName=DNS:node.example.com"
+                  ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                  srv_dir = os.path.join(tmp, "srv")
+                  env = os.environ.copy()
+                  env.update({
+                      "SSCTL_PRIVATE_DIR": priv_dir,
+                      "SSCTL_ENV_FILE": env_path,
+                      "SSCTL_CERT_DIR_OVERRIDE": cert_dir,
+                      "SSCTL_WEB_ROOT_OVERRIDE": f"{srv_dir}/www",
+                      "SSCTL_NGINX_REJECT_UNKNOWN_SNI": reject_mode,
+                  })
+                  subprocess.check_call([
+                      "bash", "-c",
+                      'source scripts/lib/common.sh && env_file_apply_batch "$SSCTL_ENV_FILE" '
+                      f'"SET:VLESS_PORT={vless_port}" "SET:REALITY_HANDSHAKE_PORT={hs_port}" '
+                      f'"SET:REALITY_PRIVATE_KEY={priv_key}" "SET:REALITY_PUBLIC_KEY={pub_key}" '
+                      '"SET:REALITY_SHORT_ID=0123456789abcdef" "SET:SUB_PATH_PREFIX=p0123456789abcde" '
+                      f'\'SET:SUBSCRIPTIONS="u1"\' "SET:UUID_U1={good_uuid}" "SET:SUB_TOKEN_U1={"a"*64}"'
+                  ], env=env)
+                  subprocess.check_call(["bash", "scripts/40-deploy-server.sh", "--render-only", srv_dir], env=env, stdout=subprocess.DEVNULL)
+
+                  os.makedirs(f"{srv_dir}/tmp", exist_ok=True)
+                  os.makedirs(f"{srv_dir}/releases/r1/p0123456789abcde/{'a'*64}", exist_ok=True)
+                  with open(f"{srv_dir}/releases/r1/p0123456789abcde/{'a'*64}/v2ray", "w") as f:
+                      f.write("SUB_OK")
+                  os.symlink(f"{srv_dir}/releases/r1", f"{srv_dir}/sub-web")
+                  outside_secret = os.path.join(tmp, "outside_secret.txt")
+                  with open(outside_secret, "w") as f:
+                      f.write("TOP_SECRET_LEAK")
+                  os.symlink(outside_secret, f"{srv_dir}/www/leak.txt")
+                  os.symlink(outside_secret, f"{srv_dir}/releases/r1/p0123456789abcde/{'a'*64}/leak.txt")
+                  with open(f"{srv_dir}/nginx/site.conf") as f:
+                      site_conf = f.read()
+                  site_conf = (site_conf
+                      .replace("/etc/ssctl/cert/fullchain.pem", f"{cert_dir}/fullchain.pem")
+                      .replace("/etc/ssctl/cert/key.pem", f"{cert_dir}/key.pem")
+                      .replace("/var/www/ssctl-site", f"{srv_dir}/www")
+                      .replace("/var/lib/ssctl/sub-web", f"{srv_dir}/sub-web"))
+                  with open(f"{srv_dir}/nginx/site-run.conf", "w") as f:
+                      f.write(site_conf)
+                  with open(f"{srv_dir}/nginx.conf", "w") as f:
+                      f.write(f"""daemon off;
+          master_process off;
+          pid {srv_dir}/nginx.pid;
+          error_log {srv_dir}/error.log;
+          events {{ worker_connections 64; }}
+          http {{
+              access_log off;
+              client_body_temp_path {srv_dir}/tmp/body;
+              proxy_temp_path {srv_dir}/tmp/proxy;
+              fastcgi_temp_path {srv_dir}/tmp/fastcgi;
+              uwsgi_temp_path {srv_dir}/tmp/uwsgi;
+              scgi_temp_path {srv_dir}/tmp/scgi;
+              include {srv_dir}/nginx/site-run.conf;
+          }}
+          """)
+                  ng = subprocess.Popen(["nginx", "-p", srv_dir, "-c", f"{srv_dir}/nginx.conf"], stderr=subprocess.DEVNULL)
+
+                  with open(f"{srv_dir}/singbox/10-inbound-vless.json") as f:
+                      inb = json.load(f)
+                  inb["inbounds"][0]["listen"] = "127.0.0.1"
+                  with open(f"{srv_dir}/singbox/10-inbound-vless.json", "w") as f:
+                      json.dump(inb, f)
+                  with open(f"{srv_dir}/singbox/90-route.json") as f:
+                      rt = json.load(f)
+                  rt["route"]["rules"] = []
+                  with open(f"{srv_dir}/singbox/90-route.json", "w") as f:
+                      json.dump(rt, f)
+
+                  sb_srv = subprocess.Popen(["sing-box", "run", "-C", f"{srv_dir}/singbox"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  time.sleep(0.7)
+
+                  def make_client(uuid_val, lport):
+                      cfg = {
+                          "log": {"level": "error"},
+                          "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": lport}],
+                          "outbounds": [{
+                              "type": "vless",
+                              "server": "127.0.0.1",
+                              "server_port": vless_port,
+                              "uuid": uuid_val,
+                              "flow": "xtls-rprx-vision",
+                              "tls": {
+                                  "enabled": True,
+                                  "server_name": "node.example.com",
+                                  "utls": {"enabled": True, "fingerprint": "chrome"},
+                                  "reality": {"enabled": True, "public_key": pub_key, "short_id": "0123456789abcdef"}
+                              }
+                          }]
+                      }
+                      p = os.path.join(tmp, f"cli_{lport}.json")
+                      with open(p, "w") as f:
+                          json.dump(cfg, f)
+                      return subprocess.Popen(["sing-box", "run", "-c", p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                  def socks_http_get(lport, path):
+                      s = socket.create_connection(("127.0.0.1", lport), timeout=3)
+                      s.sendall(b"\x05\x01\x00")
+                      assert s.recv(2) == b"\x05\x00"
+                      s.sendall(b"\x05\x01\x00\x01" + socket.inet_aton("127.0.0.1") + target_port.to_bytes(2, "big"))
+                      rep = s.recv(10)
+                      if len(rep) < 2 or rep[1] != 0:
+                          s.close()
+                          return ""
+                      s.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".encode())
+                      data = b""
+                      while True:
+                          c = s.recv(4096)
+                          if not c:
+                              break
+                          data += c
+                      s.close()
+                      return data.decode("latin1", "replace")
+
+                  cli_good = make_client(good_uuid, socks_port)
+                  cli_bad = make_client(bad_uuid, bad_socks_port)
+                  time.sleep(0.5)
+
+                  # Scenario 1: Valid REALITY + valid UUID -> 200 TARGET_OK
+                  r1 = socks_http_get(socks_port, "/s1")
+                  assert "TARGET_OK" in r1 and "/s1" in hits
+
+                  # Scenario 2: Valid REALITY + wrong UUID -> VLESS closes/rejects; neither reaches target nor falls back to Nginx HTML
+                  try:
+                      r2 = socks_http_get(bad_socks_port, "/s2")
+                  except Exception:
+                      r2 = ""
+                  assert "TARGET_OK" not in r2 and "<html" not in r2.lower() and "/s2" not in hits
+
+                  def raw_tls_http(sni, path="/"):
+                      ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                      ctx.check_hostname = False
+                      ctx.verify_mode = ssl.CERT_NONE
+                      raw = socket.create_connection(("127.0.0.1", vless_port), timeout=3)
+                      ss = ctx.wrap_socket(raw, server_hostname=sni)
+                      ss.sendall(f"GET {path} HTTP/1.1\r\nHost: node.example.com\r\nConnection: close\r\n\r\n".encode())
+                      out = b""
+                      while True:
+                          c = ss.recv(4096)
+                          if not c:
+                              break
+                          out += c
+                      ss.close()
+                      return out.decode("latin1", "replace")
+
+                  # Scenario 3: Unauthenticated TLS + known SNI -> transparent fallback to Nginx (including symlink traversal block)
+                  r3_200 = raw_tls_http("node.example.com", "/")
+                  r3_404a = raw_tls_http("node.example.com", "/missing")
+                  r3_404b = raw_tls_http("node.example.com", "/p0123456789abcde/bad/v2ray")
+                  r3_leak_www = raw_tls_http("node.example.com", "/leak.txt")
+                  r3_leak_sub = raw_tls_http("node.example.com", f"/p0123456789abcde/{'a'*64}/leak.txt")
+                  r3_sub = raw_tls_http("node.example.com", f"/p0123456789abcde/{'a'*64}/v2ray")
+                  assert "HTTP/1.1 200 OK" in r3_200 and "<!DOCTYPE html>" in r3_200 and "· rev " not in r3_200
+                  assert "HTTP/1.1 404 Not Found" in r3_404a and r3_404a.split("\r\n\r\n", 1)[1] == r3_404b.split("\r\n\r\n", 1)[1]
+                  assert "HTTP/1.1 404 Not Found" in r3_leak_www and "TOP_SECRET_LEAK" not in r3_leak_www
+                  assert "HTTP/1.1 404 Not Found" in r3_leak_sub and "TOP_SECRET_LEAK" not in r3_leak_sub
+                  assert "HTTP/1.1 200 OK" in r3_sub and "SUB_OK" in r3_sub
+
+                  # Scenarios 4 & 5: Unauthenticated TLS + wrong SNI / empty SNI across capability branch
+                  for probe_sni in ("wrong.example.com", None):
+                      if reject_mode == "true":
+                          rejected = False
+                          try:
+                              _ = raw_tls_http(probe_sni, "/")
+                          except (ssl.SSLError, ConnectionError, OSError):
+                              rejected = True
+                          assert rejected, f"Expected TLS handshake rejection for SNI={probe_sni}"
+                      else:
+                          assert "HTTP/1.1 200 OK" in raw_tls_http(probe_sni, "/")
+
+                  # Scenario 6: Premature EOF during TLS handshake & half-closed connection -> server stays healthy
+                  for payload in (b"", b"\x16\x03\x01\x00\x50\x01\x00\x00"):
+                      s = socket.create_connection(("127.0.0.1", vless_port), timeout=2)
+                      if payload:
+                          s.sendall(payload)
+                      s.close()
+                  assert "TARGET_OK" in socks_http_get(socks_port, "/after-eof") and "/after-eof" in hits
+
+                  for p in (cli_good, cli_bad, sb_srv, ng):
+                      p.terminate()
+                  httpd.shutdown()
+              finally:
+                  shutil.rmtree(tmp, ignore_errors=True)
+          PY

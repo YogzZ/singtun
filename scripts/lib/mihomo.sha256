@@ -1,0 +1,5 @@
+# Official MetaCubeX mihomo GitHub Release .gz SHA256 checksums
+# Retrieved: 2026-11-10 from https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/v1.19.33
+# Used by CI and optional local validation (`mihomo -t -f mihomo.yaml`) per AGENTS.md §3.3
+386508bfb1c72c43b6a0eda73708ecdce82546581b0ebcb16366c53757c622b6  mihomo-linux-amd64-compatible-v1.19.33.gz
+ba408b317080ee265c46cb923a50018c1b82cbd708551cdd46a1e3e307396187  mihomo-linux-arm64-v1.19.33.gz
