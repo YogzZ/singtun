@@ -25,6 +25,18 @@ prune_stale_ufw_rules() {
 
   # 按注释扫描并清理已变更或已关闭的旧端口放行规则（绝不触碰当前活跃 SSH 端口）
   local old_port_proto
+  if (( ${#ssh_tcp_map[@]} > 0 )); then
+    while IFS= read -r old_port_proto; do
+      [[ -z "${old_port_proto}" || -n "${ssh_tcp_map[${old_port_proto}]:-}" ]] && continue
+      ufw delete allow "${old_port_proto}" >/dev/null 2>&1 || true
+      log_info "已清理旧 SSH UFW 保留规则: ${old_port_proto}"
+    done < <(
+      ufw status 2>/dev/null \
+        | awk '/# ssctl-preserve-ssh([[:space:]]|$)/ && $1 ~ /^[0-9]+\/tcp$/ {print $1}' \
+        | sort -u || true
+    )
+  fi
+
   while IFS= read -r old_port_proto; do
     [[ -z "${old_port_proto}" || -n "${ssh_tcp_map[${old_port_proto}]:-}" ]] && continue
     ufw delete allow "${old_port_proto}" >/dev/null 2>&1 || true
@@ -111,7 +123,8 @@ configure_vless_conn_guard() {
   mkdir -p /etc/ssctl
   local ipv6_sets="" ipv6_rules=""
   if [[ "${SERVER_IPV6:-false}" == "true" ]]; then
-    ipv6_sets="    set vless_conn_v6 {
+    ipv6_sets="    # ct count (nft_connlimit) 自带内核 NFT_EXPR_GC 连接归零自动回收，禁止叠加 timeout（否则内核返回 EOPNOTSUPP）
+    set vless_conn_v6 {
         type ipv6_addr
         size 65535
         flags dynamic
@@ -123,8 +136,8 @@ configure_vless_conn_guard() {
         timeout 1m
     }
 "
-    ipv6_rules="        tcp dport ${VLESS_PORT} ct state new add @vless_conn_v6 { ip6 saddr & ffff:ffff:ffff:ffff:: ct count over 256 } reject with tcp reset
-        tcp dport ${VLESS_PORT} tcp flags & (fin|syn|rst|ack) == syn update @vless_rate_v6 { ip6 saddr & ffff:ffff:ffff:ffff:: limit rate over 120/second burst 240 packets } drop
+    ipv6_rules="        tcp dport ${VLESS_PORT} tcp flags & (fin|syn|rst|ack) == syn update @vless_rate_v6 { ip6 saddr & ffff:ffff:ffff:ffff:: limit rate over 120/second burst 240 packets } drop
+        tcp dport ${VLESS_PORT} ct state new add @vless_conn_v6 { ip6 saddr & ffff:ffff:ffff:ffff:: ct count over 256 } reject with tcp reset
 "
   fi
 
@@ -135,6 +148,7 @@ table inet ssctl_guard
 delete table inet ssctl_guard
 
 table inet ssctl_guard {
+    # ct count (nft_connlimit) 自带内核 NFT_EXPR_GC 连接归零自动回收，禁止叠加 timeout（否则内核返回 EOPNOTSUPP）
     set vless_conn_v4 {
         type ipv4_addr
         size 65535
@@ -149,8 +163,8 @@ table inet ssctl_guard {
 ${ipv6_sets}    chain input {
         type filter hook input priority filter - 5; policy accept;
         iifname "lo" accept
-        tcp dport ${VLESS_PORT} ct state new add @vless_conn_v4 { ip saddr ct count over 256 } reject with tcp reset
         tcp dport ${VLESS_PORT} tcp flags & (fin|syn|rst|ack) == syn update @vless_rate_v4 { ip saddr limit rate over 120/second burst 240 packets } drop
+        tcp dport ${VLESS_PORT} ct state new add @vless_conn_v4 { ip saddr ct count over 256 } reject with tcp reset
 ${ipv6_rules}    }
 }
 EOF

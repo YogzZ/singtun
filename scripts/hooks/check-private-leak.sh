@@ -4,6 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=scripts/lib/common.sh
+source "${REPO_ROOT}/scripts/lib/common.sh"
 PRIVATE_DIR="${SSCTL_PRIVATE_DIR:-${REPO_ROOT}/private}"
 PRIVATE_ENV="${SSCTL_ENV_FILE:-${PRIVATE_DIR}/.env}"
 PRIVATE_FACTS="${PRIVATE_DIR}/host-facts.md"
@@ -11,22 +13,8 @@ EXAMPLE_ENV="${REPO_ROOT}/examples/env.example"
 EXAMPLE_FACTS="${REPO_ROOT}/examples/host-facts.example.md"
 LOCAL_FILE_URI_PREFIX="file:"'///'
 
-_LEAK_TMP_FILES=()
-_cleanup_leak_tmp() {
-  local f
-  for f in "${_LEAK_TMP_FILES[@]:-}"; do
-    [[ -n "${f}" ]] && rm -f -- "${f}"
-  done
-}
-trap _cleanup_leak_tmp EXIT
-
 make_private_tmp() {
-  local __out_var="$1"
-  local f
-  f="$(mktemp)"
-  chmod 600 "${f}"
-  _LEAK_TMP_FILES+=("${f}")
-  printf -v "${__out_var}" '%s' "${f}"
+  make_temp_file "$1"
 }
 
 is_placeholder() {
@@ -67,22 +55,82 @@ is_placeholder() {
   return 1
 }
 
+_fallback_parse_env_line() {
+  local raw_line="${1%$'\r'}"
+  _parsed_key=""
+  _parsed_val=""
+
+  [[ "${raw_line}" =~ ^[[:space:]]*# ]] && return 1
+  [[ "${raw_line}" != *"="* ]] && return 1
+
+  local key="${raw_line%%=*}"
+  key="$(printf '%s' "${key}" | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/[[:space:]]+$//')"
+  [[ -n "${key}" ]] || return 1
+
+  local val="${raw_line#*=}"
+  val="${val#"${val%%[![:space:]]*}"}"
+
+  if [[ "${val}" == \"* ]]; then
+    local out="" i=1 len="${#val}" ch next_ch
+    while (( i < len )); do
+      ch="${val:i:1}"
+      if [[ "${ch}" == '"' ]]; then
+        break
+      elif [[ "${ch}" == "\\" && $((i + 1)) -lt len ]]; then
+        next_ch="${val:i+1:1}"
+        if [[ "${next_ch}" == '"' || "${next_ch}" == "\\" ]]; then
+          out+="${next_ch}"
+          i=$((i + 2))
+          continue
+        fi
+      fi
+      out+="${ch}"
+      i=$((i + 1))
+    done
+    val="${out}"
+  elif [[ "${val}" == \'* ]]; then
+    local out="" i=1 len="${#val}" ch
+    while (( i < len )); do
+      ch="${val:i:1}"
+      if [[ "${ch}" == "'" ]]; then
+        break
+      fi
+      out+="${ch}"
+      i=$((i + 1))
+    done
+    val="${out}"
+  else
+    if [[ "${val}" == \#* ]]; then
+      val=""
+    else
+      val="$(printf '%s' "${val}" | sed -E 's/[[:space:]]+#.*$//')"
+      val="${val%"${val##*[![:space:]]}"}"
+    fi
+  fi
+
+  _parsed_key="${key}"
+  _parsed_val="${val}"
+  return 0
+}
+
 collect_sensitive_tokens() {
   local -a tokens=()
 
   if [[ -f "${PRIVATE_ENV}" ]]; then
-    local line key val env_domain="" env_port="443" env_sub_pfx="" env_reality_priv=""
+    local line key val line_no=0 env_label="${PRIVATE_ENV}" env_domain="" env_port="443" env_sub_pfx="" env_reality_priv=""
+    local _parsed_type="" _parsed_key="" _parsed_val=""
     local -a env_uuids=()
-    while IFS= read -r line; do
-      [[ "${line}" =~ ^[[:space:]]*# ]] && continue
-      [[ "${line}" != *"="* ]] && continue
-      key="${line%%=*}"
-      key="$(printf '%s' "${key}" | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/[[:space:]]+$//')"
-      val="${line#*=}"
-      if [[ "${val}" != \"* && "${val}" != \'* ]]; then
-        val="$(printf '%s' "${val}" | sed -E 's/[[:space:]]+#.*$//')"
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      line_no=$((line_no + 1))
+      if _parse_env_data_line "${line}" "${env_label}" "${line_no}" 2>/dev/null; then
+        [[ "${_parsed_type}" == "KV" ]] || continue
+        key="${_parsed_key}"
+        val="${_parsed_val}"
+      else
+        _fallback_parse_env_line "${line}" || continue
+        key="${_parsed_key}"
+        val="${_parsed_val}"
       fi
-      val="$(printf '%s' "${val}" | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//')"
       if [[ "${key}" == "VLESS_PORT" && -n "${val}" ]]; then
         env_port="${val}"
       fi

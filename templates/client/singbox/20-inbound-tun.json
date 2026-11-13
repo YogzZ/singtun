@@ -7,6 +7,9 @@
         "172.19.0.1/30",
         "fdfe:dcba:9876::1/126"
       ],
+      "route_exclude_address": [
+        "203.0.113.10/32"
+      ],
       "stack": "mixed",
       "auto_route": true,
       "strict_route": true

@@ -724,6 +724,50 @@ is_valid_ipv4() {
   return 0
 }
 
+# 校验 IPv4 是否属于非公网/保留/多播网段（返回 0 表示禁止，返回 1 表示允许的公网地址或非法 IPv4）
+is_non_public_ipv4() {
+  local ip="$1"
+  local reject_doc_net="${2:-false}"
+  is_valid_ipv4 "${ip}" || return 1
+
+  local IFS='.'
+  local -a octets
+  read -r -a octets <<< "${ip}"
+  local o1=$((10#${octets[0]}))
+  local o2=$((10#${octets[1]}))
+  local o3=$((10#${octets[2]}))
+
+  if (( o1 == 0 || o1 == 10 || o1 == 127 || o1 >= 224 )); then
+    return 0
+  fi
+  if (( o1 == 100 && o2 >= 64 && o2 <= 127 )); then
+    return 0
+  fi
+  if (( o1 == 169 && o2 == 254 )); then
+    return 0
+  fi
+  if (( o1 == 172 && o2 >= 16 && o2 <= 31 )); then
+    return 0
+  fi
+  if (( o1 == 192 && o2 == 0 && o3 == 0 )); then
+    return 0
+  fi
+  if (( o1 == 192 && o2 == 168 )); then
+    return 0
+  fi
+  if (( o1 == 198 && (o2 == 18 || o2 == 19) )); then
+    return 0
+  fi
+
+  if [[ "${reject_doc_net}" == "true" ]]; then
+    if (( (o1 == 192 && o2 == 0 && o3 == 2) || (o1 == 198 && o2 == 51 && o3 == 100) || (o1 == 203 && o2 == 0 && o3 == 113) )); then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 # 加密 IP-DoH 静态白名单（证书必须包含对应裸 IP SAN，支持免域名 Bootstrap 的 https://<IP>/dns-query）
 is_valid_dns_direct_ip() {
   local ip="$1"
@@ -781,6 +825,56 @@ is_valid_reality_key() {
   [[ "${key}" =~ ^[A-Za-z0-9_-]{43}=?$ ]]
 }
 
+derive_reality_public_key() {
+  local priv_b64url="$1"
+  is_valid_reality_key "${priv_b64url}" || return 1
+  command -v openssl >/dev/null 2>&1 || return 1
+
+  local b64="${priv_b64url//-/+}"
+  b64="${b64//_//}"
+  case $(( ${#b64} % 4 )) in
+    0) ;;
+    2) b64="${b64}==" ;;
+    3) b64="${b64}=" ;;
+    *) return 1 ;;
+  esac
+
+  local tmp_der tmp_pub der_bytes pub_bytes pub
+  make_temp_file tmp_der
+  make_temp_file tmp_pub
+
+  if ! {
+    printf '\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x6e\x04\x22\x04\x20'
+    printf '%s' "${b64}" | base64 -d 2>/dev/null
+  } > "${tmp_der}"; then
+    rm -f -- "${tmp_der}" "${tmp_pub}"
+    return 1
+  fi
+
+  der_bytes="$(wc -c < "${tmp_der}" | tr -d '[:space:]')"
+  if [[ ! "${der_bytes}" =~ ^[0-9]+$ ]] || (( der_bytes != 48 )); then
+    rm -f -- "${tmp_der}" "${tmp_pub}"
+    return 1
+  fi
+
+  if ! openssl pkey -inform DER -in "${tmp_der}" -pubout -outform DER -out "${tmp_pub}" 2>/dev/null; then
+    rm -f -- "${tmp_der}" "${tmp_pub}"
+    return 1
+  fi
+
+  pub_bytes="$(wc -c < "${tmp_pub}" | tr -d '[:space:]')"
+  if [[ ! "${pub_bytes}" =~ ^[0-9]+$ ]] || (( pub_bytes != 44 )); then
+    rm -f -- "${tmp_der}" "${tmp_pub}"
+    return 1
+  fi
+
+  pub="$(tail -c 32 "${tmp_pub}" | base64 | tr '+/' '-_' | tr -d '=\n')"
+  rm -f -- "${tmp_der}" "${tmp_pub}"
+
+  is_valid_reality_key "${pub}" || return 1
+  printf '%s' "${pub}"
+}
+
 is_valid_utls_fingerprint() {
   local fp="$1"
   [[ "${fp}" =~ ^(chrome|firefox|edge|safari|360|qq|ios|android|random|randomized)$ ]]
@@ -828,12 +922,18 @@ detect_active_ssh_ports() {
   fi
 
   if command -v systemctl >/dev/null 2>&1; then
-    while IFS= read -r p; do
-      if is_valid_port "${p}" && [[ -z "${seen[${p}]:-}" ]]; then
-        seen["${p}"]=1
-        ports+=("${p}")
-      fi
-    done < <(systemctl show ssh.socket -p Listen --value 2>/dev/null | grep -Eo ':[0-9]+' | tr -d ':' || true)
+    if systemctl is-active --quiet ssh.socket 2>/dev/null || systemctl is-enabled --quiet ssh.socket 2>/dev/null; then
+      while IFS= read -r p; do
+        if is_valid_port "${p}" && [[ -z "${seen[${p}]:-}" ]]; then
+          seen["${p}"]=1
+          ports+=("${p}")
+        fi
+      done < <(
+        systemctl show ssh.socket -p Listen --value 2>/dev/null \
+          | awk '{for (i = 1; i <= NF; i++) { if ($i ~ /^[0-9]+$/) print $i; else if ($i !~ /^\// && $i ~ /:[0-9]+$/) { sub(/^.*:/, "", $i); print $i } }}' \
+          || true
+      )
+    fi
   fi
 
   if command -v ss >/dev/null 2>&1; then
@@ -1122,4 +1222,22 @@ build_hy2_uri() {
     "${mport_param}" \
     "${obfs_param}" \
     "${tag}"
+}
+
+# 当 SERVER_IPV6=true 时，收集服务端本机全局单播 IPv6 地址（每行输出一个 <addr>/128；支持 SSCTL_SELF_IPV6_OVERRIDE 测试覆写）
+collect_server_self_ipv6_cidrs() {
+  if [[ "${SERVER_IPV6:-false}" != "true" ]]; then
+    return 0
+  fi
+  local v6_item v6_addr
+  if [[ -n "${SSCTL_SELF_IPV6_OVERRIDE:-}" ]]; then
+    for v6_item in ${SSCTL_SELF_IPV6_OVERRIDE}; do
+      v6_item="${v6_item%%/*}"
+      [[ -n "${v6_item}" ]] && printf '%s/128\n' "${v6_item}"
+    done
+  elif command -v ip >/dev/null 2>&1; then
+    while IFS= read -r v6_addr; do
+      [[ -n "${v6_addr}" ]] && printf '%s/128\n' "${v6_addr}"
+    done < <(ip -6 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | sort -u || true)
+  fi
 }

@@ -56,6 +56,14 @@
         "outbound": "direct"
       },
       {
+        "domain": [
+          "mask.icloud.com",
+          "mask-h2.icloud.com",
+          "mask-api.icloud.com"
+        ],
+        "action": "reject"
+      },
+      {
         "clash_mode": "global",
         "network": "udp",
         "port": 443,
@@ -63,6 +71,70 @@
       },
       {
         "clash_mode": "global",
+        "outbound": "proxy"
+      },
+      {
+        "domain_suffix": [
+          "google",
+          "google.com",
+          "gstatic.com",
+          "googleapis.com",
+          "googleusercontent.com",
+          "ggpht.com",
+          "1e100.net",
+          "gvt1.com",
+          "gvt2.com",
+          "gvt3.com",
+          "appspot.com",
+          "firebaseio.com",
+          "firebaseapp.com",
+          "crashlytics.com",
+          "app-analytics-services.com",
+          "app-measurement.com",
+          "googletagmanager.com",
+          "googletagservices.com",
+          "google-analytics.com",
+          "googlesyndication.com",
+          "doubleclick.net",
+          "2mdn.net",
+          "recaptcha.net",
+          "pki.goog",
+          "ampproject.org",
+          "android.com"
+        ],
+        "network": "udp",
+        "port": 443,
+        "action": "reject"
+      },
+      {
+        "domain_suffix": [
+          "google",
+          "google.com",
+          "gstatic.com",
+          "googleapis.com",
+          "googleusercontent.com",
+          "ggpht.com",
+          "1e100.net",
+          "gvt1.com",
+          "gvt2.com",
+          "gvt3.com",
+          "appspot.com",
+          "firebaseio.com",
+          "firebaseapp.com",
+          "crashlytics.com",
+          "app-analytics-services.com",
+          "app-measurement.com",
+          "googletagmanager.com",
+          "googletagservices.com",
+          "google-analytics.com",
+          "googlesyndication.com",
+          "doubleclick.net",
+          "2mdn.net",
+          "recaptcha.net",
+          "pki.goog",
+          "ampproject.org",
+          "android.com"
+        ],
         "outbound": "proxy"
       },
       {

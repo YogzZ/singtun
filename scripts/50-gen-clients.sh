@@ -85,6 +85,25 @@ build_client_hy2_outbound_json() {
       end'
 }
 
+# Apple iCloud Private Relay 金丝雀与控制面域名（按官方网络规范返回 NXDOMAIN 并在路由层 REJECT，防止 iOS/macOS Safari 启用 MASQUE UDP 443 死锁或改变固定出口）
+PRIVATE_RELAY_CANARY_DOMAINS=(
+  "mask.icloud.com"
+  "mask-h2.icloud.com"
+  "mask-api.icloud.com"
+)
+
+# 上游 geosite-cn / direct.txt 历史遗留 @cn 误判的海外核心域名后缀（三端同源前置：远端加密 DoH + UDP 443 REJECT + PROXY）
+OVERSEAS_PROXY_PRIORITY_SUFFIXES=(
+  "google" "google.com" "gstatic.com" "googleapis.com"
+  "googleusercontent.com" "ggpht.com" "1e100.net"
+  "gvt1.com" "gvt2.com" "gvt3.com"
+  "appspot.com" "firebaseio.com" "firebaseapp.com"
+  "crashlytics.com" "app-analytics-services.com" "app-measurement.com"
+  "googletagmanager.com" "googletagservices.com" "google-analytics.com"
+  "googlesyndication.com" "doubleclick.net" "2mdn.net"
+  "recaptcha.net" "pki.goog" "ampproject.org" "android.com"
+)
+
 render_sub_singbox_json() {
   local uuid="$1"
   local out_file="$2"
@@ -105,12 +124,25 @@ render_sub_singbox_json() {
     hy2_outbound="$(build_client_hy2_outbound_json "${uuid}")"
   fi
 
+  local canary_json overseas_suffixes_json
+  canary_json="$(printf '%s\n' "${PRIVATE_RELAY_CANARY_DOMAINS[@]}" | jq -R . | jq -s .)"
+  overseas_suffixes_json="$(printf '%s\n' "${OVERSEAS_PROXY_PRIORITY_SUFFIXES[@]}" | jq -R . | jq -s .)"
+
+  local -a self_cidrs=("${SERVER_IP}/32")
+  local v6_cidr
+  while IFS= read -r v6_cidr; do
+    [[ -n "${v6_cidr}" ]] && self_cidrs+=("${v6_cidr}")
+  done < <(collect_server_self_ipv6_cidrs)
+  local self_cidrs_json
+  self_cidrs_json="$(printf '%s\n' "${self_cidrs[@]}" | jq -R . | jq -sc .)"
+
   SUB_UUID="${uuid}" HY2_OUTBOUND_JSON="${hy2_outbound}" jq -s \
     --arg dns_remote "${DNS_REMOTE}" \
     --arg dns_direct "${DNS_DIRECT}" \
     --arg dns_strategy "${dns_strategy}" \
     --argjson reject_ipv6 "${reject_ipv6}" \
     --arg server_ip "${SERVER_IP}" \
+    --argjson self_cidrs "${self_cidrs_json}" \
     --argjson server_port "${VLESS_PORT}" \
     --arg server_domain "${SERVER_DOMAIN}" \
     --arg utls_fp "${UTLS_FINGERPRINT}" \
@@ -120,6 +152,8 @@ render_sub_singbox_json() {
     --arg geoip_cn_url "${RULESET_GEOIP_CN}" \
     --arg compat "${compat_mode}" \
     --argjson enable_hy2 "${enable_hy2}" \
+    --argjson canary_domains "${canary_json}" \
+    --argjson overseas_proxy_suffixes "${overseas_suffixes_json}" \
     '(
       .[3].outbounds[0]
       | .server = $server_ip
@@ -138,12 +172,29 @@ render_sub_singbox_json() {
       experimental: .[0].experimental,
       dns: (
         .[1].dns
-        | .servers[0].server = $dns_remote
-        | .servers[1].server = $dns_direct
-        | .rules = ([{"domain": [$server_domain], "server": "dns-direct"}] + .rules)
+        | .servers |= map(
+            if .tag == "dns-remote" then .server = $dns_remote
+            elif .tag == "dns-direct" then .server = $dns_direct
+            else .
+            end
+          )
+        | .rules |= (
+            map(
+              if (.action == "predefined" and .rcode == "NXDOMAIN") then
+                .domain = $canary_domains
+              elif (.server == "dns-remote" and has("domain_suffix")) then
+                .domain_suffix = $overseas_proxy_suffixes
+              else .
+              end
+            )
+            | [{"domain": [$server_domain], "server": "dns-direct"}] + .
+          )
         | .strategy = $dns_strategy
       ),
-      inbounds: .[2].inbounds,
+      inbounds: (
+        .[2].inbounds
+        | .[0].route_exclude_address = $self_cidrs
+      ),
       outbounds: (
         if $enable_hy2 then
           [
@@ -176,16 +227,34 @@ render_sub_singbox_json() {
       route: (
         .[4].route
         | .default_domain_resolver.strategy = $dns_strategy
-        | .rule_set[0].url = $geosite_cn_url
-        | .rule_set[1].url = $geoip_cn_url
-        | .rules = (
-            .rules[0:4]
-            + [
-                {"domain": [$server_domain], "outbound": "direct"},
-                {"ip_cidr": [($server_ip + "/32")], "outbound": "direct"}
-              ]
-            + (if $reject_ipv6 then [{"ip_version": 6, "action": "reject"}] else [] end)
-            + .rules[4:]
+        | .rule_set |= map(
+            if .tag == "geosite-cn" then .url = $geosite_cn_url
+            elif .tag == "geoip-cn" then .url = $geoip_cn_url
+            else .
+            end
+          )
+        | .rules |= (
+            map(
+              if (.action == "reject" and has("domain")) then
+                .domain = $canary_domains
+              elif (.action == "reject" and .network == "udp" and .port == 443 and has("domain_suffix")) then
+                .domain_suffix = $overseas_proxy_suffixes
+              elif (.outbound == "proxy" and has("domain_suffix")) then
+                .domain_suffix = $overseas_proxy_suffixes
+              else .
+              end
+            )
+            | (
+                [to_entries[] | select((.value.ip_cidr // [] | index("100.64.0.0/10") != null) and .value.outbound == "direct") | .key][0]
+                // error("route.rules 缺少 100.64.0.0/10 direct 锚点规则")
+              ) as $anchor_idx
+            | .[0:($anchor_idx + 1)]
+              + [
+                  {"domain": [$server_domain], "outbound": "direct"},
+                  {"ip_cidr": $self_cidrs, "outbound": "direct"}
+                ]
+              + (if $reject_ipv6 then [{"ip_version": 6, "action": "reject"}] else [] end)
+              + .[($anchor_idx + 1):]
           )
       )
     }
@@ -235,8 +304,20 @@ SR_CN_FALLBACK_SUFFIXES=(
   "ctrip.com" "c-ctrip.com" "12306.cn"
   "xiaomi.com" "xiaomi.net" "mi.com" "mi-img.com" "miui.com"
   "huawei.com" "vmall.com" "dbankcdn.com" "hicloud.com" "apple.com.cn"
-  # Apple 定位与天气服务（避免海外代理解析导致地理定位漂移或国内天气源失败）
-  "ls.apple.com" "weather-data.apple.com" "weather-edge.apple.com" "weather-map.apple.com"
+  # Apple App Store 与软件/静态资源下载 CDN（上游 DOMAIN-SET 判直连，同步走国内 DoH 命中大陆 CDN 边缘节点）
+  "apps.apple.com" "itunes.apple.com" "mzstatic.com" "cdn-apple.com" "aaplimg.com"
+  # Apple 定位、地图与全量天气（含 iOS 16+ WeatherKit，避免海外代理解析导致地理定位漂移或天气源失败）
+  "ls.apple.com" "gs-loc.apple.com" "gs-loc-cn.apple.com" "iphone-ld.apple.com" "maps.apple.com" "apple-mapkit.com"
+  "weatherkit.apple.com" "weather-data.apple.com" "weather-edge.apple.com" "weather-map.apple.com" "weather-map2.apple.com"
+  # Apple 系统校时 (NTP UDP 123，避免落入 VLESS Vision 触发 UDP flow mismatch)、推送与账号配置初始化
+  "time.apple.com" "push.apple.com" "ess.apple.com" "configuration.apple.com" "xp.apple.com"
+  "swallow.apple.com" "pancake.apple.com" "smp-device-content.apple.com" "ipcdn.apple.com" "init-p01md.apple.com" "cds.apple.com"
+  "guzzoni.apple.com" "smoot.apple.com"
+  # Apple 系统更新、固件分发与证书 OCSP/CRL 吊销校验
+  "mesu.apple.com" "appldnld.apple.com" "swscan.apple.com" "swdist.apple.com" "swcdn.apple.com" "oscdn.apple.com"
+  "ocsp.apple.com" "ocsp2.apple.com" "crl.apple.com" "certs.apple.com" "valid.apple.com"
+  # Apple Game Center、官网商城支持与音乐/播客国内 CDN
+  "gc.apple.com" "store.apple.com" "support.apple.com" "music.apple.com" "podcasts.apple.com"
 )
 
 render_mihomo_yaml() {
@@ -309,9 +390,42 @@ render_mihomo_yaml() {
       - \"${hy2_tag}\""
   fi
 
+  local mihomo_fake_ip_canaries="" mihomo_ns_policy_overrides="" mihomo_private_relay_rules="" mihomo_overseas_priority_rules=""
+  local dom sfx
+  for dom in "${PRIVATE_RELAY_CANARY_DOMAINS[@]}"; do
+    [[ -n "${mihomo_fake_ip_canaries}" ]] && mihomo_fake_ip_canaries+=$'\n'
+    mihomo_fake_ip_canaries+="    - \"${dom}\""
+    [[ -n "${mihomo_ns_policy_overrides}" ]] && mihomo_ns_policy_overrides+=$'\n'
+    mihomo_ns_policy_overrides+="    \"${dom}\": \"rcode://name_error\""
+    [[ -n "${mihomo_private_relay_rules}" ]] && mihomo_private_relay_rules+=$'\n'
+    mihomo_private_relay_rules+="  - DOMAIN,${dom},REJECT"
+  done
+  for sfx in "${OVERSEAS_PROXY_PRIORITY_SUFFIXES[@]}"; do
+    [[ -n "${mihomo_ns_policy_overrides}" ]] && mihomo_ns_policy_overrides+=$'\n'
+    mihomo_ns_policy_overrides+="    \"+.${sfx}\":"$'\n'"      - \"https://${DNS_REMOTE}/dns-query#PROXY\""
+    [[ -n "${mihomo_overseas_priority_rules}" ]] && mihomo_overseas_priority_rules+=$'\n'
+    mihomo_overseas_priority_rules+="  - AND,((NETWORK,UDP),(DST-PORT,443),(DOMAIN-SUFFIX,${sfx})),REJECT"$'\n'"  - DOMAIN-SUFFIX,${sfx},PROXY"
+  done
+
+  local mihomo_tun_route_exclude="    - ${SERVER_IP}/32"
+  local mihomo_self_ip_direct_rules="  - IP-CIDR,${SERVER_IP}/32,DIRECT,no-resolve"
+  local v6_cidr
+  while IFS= read -r v6_cidr; do
+    if [[ -n "${v6_cidr}" ]]; then
+      mihomo_tun_route_exclude+=$'\n'"    - ${v6_cidr}"
+      mihomo_self_ip_direct_rules+=$'\n'"  - IP-CIDR6,${v6_cidr},DIRECT,no-resolve"
+    fi
+  done < <(collect_server_self_ipv6_cidrs)
+
   shopt -u patsub_replacement 2>/dev/null || true
   local tpl
   tpl="$(<"${CLIENT_TPL_DIR}/mihomo.yaml")"
+  tpl="${tpl//__MIHOMO_TUN_ROUTE_EXCLUDE__/"${mihomo_tun_route_exclude}"}"
+  tpl="${tpl//__MIHOMO_SELF_IP_DIRECT_RULES__/"${mihomo_self_ip_direct_rules}"}"
+  tpl="${tpl//__MIHOMO_FAKE_IP_FILTER_CANARIES__/"${mihomo_fake_ip_canaries}"}"
+  tpl="${tpl//__MIHOMO_NAMESERVER_POLICY_OVERRIDES__/"${mihomo_ns_policy_overrides}"}"
+  tpl="${tpl//__MIHOMO_PRIVATE_RELAY_RULES__/"${mihomo_private_relay_rules}"}"
+  tpl="${tpl//__MIHOMO_OVERSEAS_PRIORITY_RULES__/"${mihomo_overseas_priority_rules}"}"
   tpl="${tpl//__MIHOMO_HY2_PROXY_BLOCK__/"${mihomo_hy2_proxy_block}"}"
   tpl="${tpl//__MIHOMO_PROXY_GROUPS_BLOCK__/"${mihomo_proxy_groups_block}"}"
   tpl="${tpl//__IPV6_BOOL__/"${ipv6_bool}"}"
@@ -362,16 +476,37 @@ render_shadowrocket_conf() {
     fi
   done
 
+  local sr_private_relay_rules="" sr_overseas_priority_rules="" dom
+  for dom in "${PRIVATE_RELAY_CANARY_DOMAINS[@]}"; do
+    [[ -n "${sr_private_relay_rules}" ]] && sr_private_relay_rules+=$'\n'
+    sr_private_relay_rules+="DOMAIN,${dom},REJECT"
+  done
+  for sfx in "${OVERSEAS_PROXY_PRIORITY_SUFFIXES[@]}"; do
+    [[ -n "${sr_overseas_priority_rules}" ]] && sr_overseas_priority_rules+=$'\n'
+    sr_overseas_priority_rules+="AND,((PROTOCOL,UDP),(DST-PORT,443),(DOMAIN-SUFFIX,${sfx})),REJECT"$'\n'"DOMAIN-SUFFIX,${sfx},PROXY"
+  done
+
   local dns_remote_fallback="8.8.8.8"
   if [[ "${DNS_REMOTE}" == "8.8.8.8" ]]; then
     dns_remote_fallback="1.1.1.1"
   fi
   local sr_dns_remote_rules="IP-CIDR,${DNS_REMOTE}/32,PROXY,no-resolve"$'\n'"IP-CIDR,${dns_remote_fallback}/32,PROXY,no-resolve"
 
+  local sr_self_ip_direct_rules="IP-CIDR,${SERVER_IP}/32,DIRECT,no-resolve"
+  local v6_cidr
+  while IFS= read -r v6_cidr; do
+    if [[ -n "${v6_cidr}" ]]; then
+      sr_self_ip_direct_rules+=$'\n'"IP-CIDR6,${v6_cidr},DIRECT,no-resolve"
+    fi
+  done < <(collect_server_self_ipv6_cidrs)
+
   shopt -u patsub_replacement 2>/dev/null || true
   local tpl
   tpl="$(<"${CLIENT_TPL_DIR}/shadowrocket.conf")"
   tpl="${tpl//__SR_UPDATE_URL_LINE__/"${sr_update_url_line}"}"
+  tpl="${tpl//__SR_SELF_IP_DIRECT_RULES__/"${sr_self_ip_direct_rules}"}"
+  tpl="${tpl//__SR_PRIVATE_RELAY_RULES__/"${sr_private_relay_rules}"}"
+  tpl="${tpl//__SR_OVERSEAS_PRIORITY_RULES__/"${sr_overseas_priority_rules}"}"
   tpl="${tpl//__SR_CN_DOMAIN_SUFFIX_RULES__/"${sr_rule_lines}"}"
   tpl="${tpl//__SR_CN_HOST_DIRECT_LINES__/"${sr_host_lines}"}"
   tpl="${tpl//__SR_DNS_REMOTE_RULES__/"${sr_dns_remote_rules}"}"
@@ -648,11 +783,12 @@ publish_public_subscriptions() {
 render_single_subscription() {
   local sub="$1"
   local has_singbox="$2"
+  local dest_root="${3:-${OUT_ROOT}}"
 
   local uuid tok sub_dir tmp_sub_dir json_file mihomo_file sr_file links_file v2ray_file urls_file vless_uri hy2_uri
   uuid="$(get_sub_uuid "${sub}")"
   tok="$(get_sub_token "${sub}")"
-  sub_dir="${OUT_ROOT}/${sub}"
+  sub_dir="${dest_root}/${sub}"
   make_temp_dir tmp_sub_dir
 
   json_file="${tmp_sub_dir}/sing-box.json"
@@ -686,13 +822,15 @@ render_single_subscription() {
   render_urls_summary "${sub}" "${tok}" "${vless_uri}" "${hy2_uri}" "${urls_file}"
 
   chmod 600 "${json_file}" "${mihomo_file}" "${sr_file}" "${links_file}" "${v2ray_file}" "${urls_file}"
-  mkdir -p "${sub_dir}"
-  chmod 700 "${sub_dir}"
+  mkdir -p "${dest_root}" "${sub_dir}"
+  chmod 700 "${dest_root}" "${sub_dir}"
   mv -f "${json_file}" "${mihomo_file}" "${sr_file}" "${links_file}" "${v2ray_file}" "${urls_file}" "${sub_dir}/"
   chmod 600 "${sub_dir}/sing-box.json" "${sub_dir}/mihomo.yaml" "${sub_dir}/shadowrocket.conf" \
     "${sub_dir}/links.txt" "${sub_dir}/v2ray" "${sub_dir}/urls.txt"
   rm -rf -- "${tmp_sub_dir}"
-  log_info "已生成订阅 [${sub}] 本地配置 -> ${sub_dir}/"
+  if [[ "${dest_root}" == "${OUT_ROOT}" ]]; then
+    log_info "已生成订阅 [${sub}] 本地配置 -> ${sub_dir}/"
+  fi
 }
 
 main() {
@@ -766,10 +904,22 @@ main() {
     RULESET_GEOIP_CN
 
   is_valid_ipv4 "${SERVER_IP}" || die "SERVER_IP 非合法 IPv4 地址: ${SERVER_IP}"
+  if declare -F is_non_public_ipv4 >/dev/null 2>&1 && is_non_public_ipv4 "${SERVER_IP}" false; then
+    die "SERVER_IP 不能使用内网、环回、CGNAT 或保留 IPv4 地址: ${SERVER_IP}"
+  fi
   is_valid_domain "${SERVER_DOMAIN}" || die "SERVER_DOMAIN 格式非法: ${SERVER_DOMAIN}"
   is_valid_port "${VLESS_PORT}" || die "VLESS_PORT 端口非法: ${VLESS_PORT}"
   is_valid_reality_key "${REALITY_PRIVATE_KEY}" || die "REALITY_PRIVATE_KEY 格式非法"
   is_valid_reality_key "${REALITY_PUBLIC_KEY}" || die "REALITY_PUBLIC_KEY 格式非法"
+  if declare -F derive_reality_public_key >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
+    local expected_reality_pub=""
+    if ! expected_reality_pub="$(derive_reality_public_key "${REALITY_PRIVATE_KEY}")" || [[ -z "${expected_reality_pub}" ]]; then
+      die "无法从 REALITY_PRIVATE_KEY 派生公钥，请检查 REALITY_PRIVATE_KEY 是否为合法 X25519 私钥"
+    fi
+    if [[ "${REALITY_PUBLIC_KEY}" != "${expected_reality_pub}" ]]; then
+      die "REALITY_PUBLIC_KEY 与 REALITY_PRIVATE_KEY 不匹配，请核对或运行 './ssctl init' 恢复匹配的公钥"
+    fi
+  fi
   is_valid_short_id "${REALITY_SHORT_ID}" || die "REALITY_SHORT_ID 必须为 2-16 位偶数长度十六进制字符串: ${REALITY_SHORT_ID}"
   is_valid_utls_fingerprint "${UTLS_FINGERPRINT}" || die "UTLS_FINGERPRINT 非法: ${UTLS_FINGERPRINT}"
   is_valid_sub_prefix "${SUB_PATH_PREFIX}" || die "SUB_PATH_PREFIX 格式非法或包含特征前缀: ${SUB_PATH_PREFIX}"
@@ -785,6 +935,9 @@ main() {
   mkdir -p "${OUT_ROOT}"
   chmod 700 "${OUT_ROOT}"
 
+  local stage_out_root=""
+  make_temp_dir stage_out_root
+  local -a staged_subs=()
   local sub
   local generated_count=0
   local total_subs=0
@@ -799,12 +952,14 @@ main() {
       # 若非仅本地模式且其他订阅尚未生成本地文件，自动补齐渲染以保障公网原子发布完整
       local other_dir="${OUT_ROOT}/${sub}"
       if [[ "${local_only}" != "true" ]] && [[ ! -f "${other_dir}/v2ray" || ! -f "${other_dir}/sing-box.json" || ! -f "${other_dir}/mihomo.yaml" || ! -f "${other_dir}/shadowrocket.conf" ]]; then
-        render_single_subscription "${sub}" "${has_singbox}"
+        render_single_subscription "${sub}" "${has_singbox}" "${stage_out_root}"
+        staged_subs+=("${sub}")
       fi
       continue
     fi
 
-    render_single_subscription "${sub}" "${has_singbox}"
+    render_single_subscription "${sub}" "${has_singbox}" "${stage_out_root}"
+    staged_subs+=("${sub}")
     generated_count=$((generated_count + 1))
   done < <(list_subscriptions)
 
@@ -812,16 +967,54 @@ main() {
     die "未找到匹配的订阅 '${target_sub}'（当前 SUBSCRIPTIONS=\"${SUBSCRIPTIONS:-}\"）"
   fi
 
+  for sub in "${staged_subs[@]}"; do
+    local src_sub="${stage_out_root}/${sub}"
+    local dst_sub="${OUT_ROOT}/${sub}"
+    local tmp_dst="${OUT_ROOT}/.${sub}.stage.$$"
+    local old_dst="${OUT_ROOT}/.${sub}.old.$$"
+    rm -rf -- "${tmp_dst}" "${old_dst}"
+    register_cleanup_path "${tmp_dst}"
+    mkdir -p "${tmp_dst}"
+    chmod 700 "${tmp_dst}"
+    cp -f "${src_sub}/sing-box.json" "${src_sub}/mihomo.yaml" "${src_sub}/shadowrocket.conf" \
+      "${src_sub}/links.txt" "${src_sub}/v2ray" "${src_sub}/urls.txt" "${tmp_dst}/"
+    chmod 600 "${tmp_dst}/sing-box.json" "${tmp_dst}/mihomo.yaml" "${tmp_dst}/shadowrocket.conf" \
+      "${tmp_dst}/links.txt" "${tmp_dst}/v2ray" "${tmp_dst}/urls.txt"
+    if [[ -e "${dst_sub}" || -L "${dst_sub}" ]]; then
+      mv -Tf "${dst_sub}" "${old_dst}"
+    fi
+    if ! mv -Tf "${tmp_dst}" "${dst_sub}"; then
+      if [[ -e "${old_dst}" || -L "${old_dst}" ]]; then
+        mv -Tf "${old_dst}" "${dst_sub}" 2>/dev/null || true
+      fi
+      die "原子替换订阅输出目录失败: ${dst_sub}"
+    fi
+    rm -rf -- "${old_dst}"
+    log_info "已生成订阅 [${sub}] 本地配置 -> ${dst_sub}/"
+  done
+
   if [[ -z "${target_sub}" ]]; then
     prune_stale_sub_dirs
   fi
 
-  # 通过 sudo 执行时将本地 private/out 归属给调用者（保持 700/600 权限）
-  if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-    if id -u "${SUDO_USER}" >/dev/null 2>&1; then
-      local caller_group
-      caller_group="$(id -gn "${SUDO_USER}")"
-      chown -R "${SUDO_USER}:${caller_group}" "${OUT_ROOT}"
+  # 通过 sudo 或以 root 执行时，将本地 private/out 归属恢复为非 root 调用者或 private/仓库属主（禁止跟随符号链接）
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    local ug="" cand_ug=""
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]] && id -u "${SUDO_USER}" >/dev/null 2>&1; then
+      ug="$(id -u "${SUDO_USER}"):$(id -g "${SUDO_USER}")"
+    else
+      cand_ug="$(stat -c '%u:%g' "${PRIVATE_DIR}" 2>/dev/null || true)"
+      if [[ -n "${cand_ug}" && "${cand_ug%%:*}" != "0" ]]; then
+        ug="${cand_ug}"
+      else
+        cand_ug="$(stat -c '%u:%g' "${REPO_ROOT}" 2>/dev/null || true)"
+        if [[ -n "${cand_ug}" && "${cand_ug%%:*}" != "0" ]]; then
+          ug="${cand_ug}"
+        fi
+      fi
+    fi
+    if [[ -n "${ug}" ]]; then
+      chown -RP "${ug}" "${OUT_ROOT}"
     fi
   fi
 

@@ -132,12 +132,84 @@ install_acme_sh() {
   log_info "acme.sh v${ACME_VERSION} 校验并安装完成。"
 }
 
+acme_account_apply_ops() {
+  local account_conf="$1"
+  shift
+  [[ -f "${account_conf}" ]] || return 0
+
+  local account_dir work_file step_file
+  account_dir="$(dirname "${account_conf}")"
+  work_file="$(mktemp "${account_dir}/.account.conf.tmp.XXXXXX")"
+  chmod 600 "${work_file}"
+  register_cleanup_path "${work_file}"
+  make_temp_file step_file
+
+  cp -f "${account_conf}" "${work_file}"
+  chmod 600 "${work_file}"
+
+  local spec op rest key val
+  for spec in "$@"; do
+    op="${spec%%:*}"
+    rest="${spec#*:}"
+    case "${op}" in
+      SET)
+        key="${rest%%=*}"
+        val="${rest#*=}"
+        K="${key}" V="${val}" awk '
+          BEGIN {
+            k = ENVIRON["K"]
+            v = ENVIRON["V"]
+            done = 0
+            pat = "^[[:space:]]*(export[[:space:]]+)?" k "="
+          }
+          $0 ~ pat {
+            if (!done) {
+              print k "=" v
+              done = 1
+            }
+            next
+          }
+          { print }
+          END {
+            if (!done) {
+              print k "=" v
+            }
+          }
+        ' "${work_file}" > "${step_file}"
+        chmod 600 "${step_file}"
+        mv -f "${step_file}" "${work_file}"
+        make_temp_file step_file
+        ;;
+      DEL)
+        key="${rest}"
+        K="${key}" awk '
+          BEGIN {
+            k = ENVIRON["K"]
+            pat = "^[[:space:]]*(export[[:space:]]+)?" k "="
+          }
+          $0 !~ pat { print }
+        ' "${work_file}" > "${step_file}"
+        chmod 600 "${step_file}"
+        mv -f "${step_file}" "${work_file}"
+        make_temp_file step_file
+        ;;
+      *)
+        rm -f -- "${work_file}" "${step_file}"
+        die "acme_account_apply_ops 未知操作指令: ${spec}"
+        ;;
+    esac
+  done
+
+  chmod 600 "${work_file}"
+  mv -f "${work_file}" "${account_conf}"
+  chmod 600 "${account_conf}"
+}
+
 sync_acme_cf_token() {
   local account_conf="${ACME_HOME}/account.conf"
   if [[ -f "${account_conf}" && -n "${CF_API_TOKEN:-}" ]]; then
     local escaped_tok="'${CF_API_TOKEN//\'/\'\\\'\'}'"
-    env_file_set_var "SAVED_CF_Token" "${escaped_tok}" "${account_conf}"
-    chmod 600 "${account_conf}"
+    acme_account_apply_ops "${account_conf}" "SET:SAVED_CF_Token=${escaped_tok}"
   fi
 }
 
@@ -149,14 +221,13 @@ configure_acme_notify() {
     fi
     log_info "配置 acme.sh 续期告警通知钩子 (${ACME_NOTIFY_HOOK})..."
     run_acme --set-notify --notify-hook "${ACME_NOTIFY_HOOK}"
-  elif [[ -f "${account_conf}" ]] && grep -Eq '^SAVED_NOTIFY_HOOK=' "${account_conf}"; then
+  elif [[ -f "${account_conf}" ]] && grep -Eq '^[[:space:]]*(export[[:space:]]+)?SAVED_NOTIFY_HOOK=' "${account_conf}"; then
     log_info "检测到 ACME_NOTIFY_HOOK 已留空，正在清理 acme.sh 历史通知钩子配置..."
-    env_file_apply_batch "${account_conf}" \
+    acme_account_apply_ops "${account_conf}" \
       "DEL:SAVED_NOTIFY_HOOK" \
       "DEL:SAVED_NOTIFY_LEVEL" \
       "DEL:SAVED_NOTIFY_MODE" \
       "DEL:SAVED_NOTIFY_SOURCE"
-    chmod 600 "${account_conf}"
   fi
 }
 

@@ -479,10 +479,16 @@ cmd_init() {
   load_env
 
   local -a init_ops=()
-  local need_keypair="false" need_sid="false" need_pfx="false"
+  local need_keypair="false" need_derived_pub="false" need_sid="false" need_pfx="false"
   local gen_priv="" gen_pub="" gen_sid="" gen_pfx=""
 
-  if [[ -z "${REALITY_PRIVATE_KEY:-}" || -z "${REALITY_PUBLIC_KEY:-}" ]]; then
+  if [[ -n "${REALITY_PRIVATE_KEY:-}" ]] \
+    && is_valid_reality_key "${REALITY_PRIVATE_KEY}" \
+    && [[ -z "${REALITY_PUBLIC_KEY:-}" ]] \
+    && gen_pub="$(derive_reality_public_key "${REALITY_PRIVATE_KEY}" 2>/dev/null)"; then
+    init_ops+=("SET:REALITY_PUBLIC_KEY=${gen_pub}")
+    need_derived_pub="true"
+  elif [[ -z "${REALITY_PRIVATE_KEY:-}" || -z "${REALITY_PUBLIC_KEY:-}" ]]; then
     local keypair
     keypair="$(generate_reality_keypair)"
     gen_priv="${keypair%% *}"
@@ -545,6 +551,7 @@ cmd_init() {
     env_file_apply_batch "${ENV_FILE}" "${init_ops[@]}"
     load_env
     [[ "${need_keypair}" == "true" ]] && log_info "已生成 REALITY X25519 密钥对并写入 ${ENV_FILE}"
+    [[ "${need_derived_pub}" == "true" ]] && log_info "已根据现有 REALITY_PRIVATE_KEY 补全 REALITY_PUBLIC_KEY 并写入 ${ENV_FILE}"
     [[ "${need_sid}" == "true" ]] && log_info "已生成 REALITY_SHORT_ID (${gen_sid}) 并写入 ${ENV_FILE}"
     [[ "${need_pfx}" == "true" ]] && log_info "已生成高熵无特征订阅路径前缀 SUB_PATH_PREFIX 并写入 ${ENV_FILE}"
     local msg
@@ -816,16 +823,16 @@ print_subscription_info() {
   printf '========================================================================\n'
 
   if [[ "${ENABLE_SUBSCRIPTION:-true}" == "true" ]]; then
-    printf '\n[1] 通用节点订阅 (Shadowrocket / v2rayN / v2rayNG — Base64):\n    %s\n' "${v2ray_url}"
-    printf '\n[2] sing-box 远程配置 (macOS/iOS/Android SFM/SFA >= %s / Linux):\n    %s\n' "${SINGBOX_CLIENT_COMPAT:-1.14}" "${sb_url}"
-    printf '\n[3] Clash.Meta / mihomo 远程配置 (Clash Verge Rev / FlClash / OpenClash):\n    %s\n' "${mihomo_url}"
-    printf '\n[4] Shadowrocket 远程分流配置 (iOS 配置页添加 URL，免手动传文件):\n    %s\n' "${sr_url}"
+    printf '\n[1] 通用节点订阅 (仅含节点，需配合客户端规则 — Shadowrocket / v2rayN Base64):\n    %s\n' "${v2ray_url}"
+    printf '\n[2] sing-box 全托管远程配置 (全平台首选: Win SFW / Mac·iOS SFM / Android SFA >= %s / Linux):\n    %s\n' "${SINGBOX_CLIENT_COMPAT:-1.14}" "${sb_url}"
+    printf '\n[3] Clash.Meta / mihomo 全托管远程配置 (Clash Verge Rev / FlClash / Stash):\n    %s\n' "${mihomo_url}"
+    printf '\n[4] Shadowrocket 远程分流规则 (不含节点，iOS 小火箭需配合 [1] 一起导入):\n    %s\n' "${sr_url}"
 
     printf '\n[客户端一键唤起深链]\n'
-    printf '  - SFM / SFA   : sing-box://import-remote-profile?url=%s#%s-%s\n' "${sb_enc}" "${SERVER_DOMAIN}" "${sub}"
-    printf '  - Clash Verge : clash://install-config?url=%s&name=%s-%s\n' "${mihomo_enc}" "${SERVER_DOMAIN}" "${sub}"
-    printf '  - Shadowrocket: sub://%s#%s-%s\n' "${v2ray_b64}" "${SERVER_DOMAIN}" "${sub}"
-    printf '  - SR 分流规则 : shadowrocket://config/add/%s\n' "${sr_url}"
+    printf '  - sing-box 官方客户端 : sing-box://import-remote-profile?url=%s#%s-%s\n' "${sb_enc}" "${SERVER_DOMAIN}" "${sub}"
+    printf '  - Clash Verge / Stash : clash://install-config?url=%s&name=%s-%s\n' "${mihomo_enc}" "${SERVER_DOMAIN}" "${sub}"
+    printf '  - Shadowrocket 节点   : sub://%s#%s-%s\n' "${v2ray_b64}" "${SERVER_DOMAIN}" "${sub}"
+    printf '  - Shadowrocket 规则   : shadowrocket://config/add/%s\n' "${sr_url}"
   else
     printf '\n[提示] 当前 ENABLE_SUBSCRIPTION=false，未开放公网 HTTPS 订阅链接；请从本地目录取回配置文件。\n'
   fi
@@ -1229,6 +1236,7 @@ cmd_restart() {
   require_root
   acquire_ssctl_lock
   systemctl restart nginx sing-box
+  sleep 1
   if ! systemctl is-active --quiet nginx || ! systemctl is-active --quiet sing-box; then
     die "重启后 Nginx 或 sing-box 未处于 active 状态，请运行 'sudo ./ssctl status' 与 'sudo ./ssctl logs' 排查！"
   fi

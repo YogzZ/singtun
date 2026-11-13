@@ -121,27 +121,13 @@ render_singbox_server_config() {
   fi
 
   # 90-route.json（注入项目策略级特殊网段与本机公网地址拒绝）
+  local -a self_cidrs=("${SERVER_IP}/32")
+  local v6_cidr
+  while IFS= read -r v6_cidr; do
+    [[ -n "${v6_cidr}" ]] && self_cidrs+=("${v6_cidr}")
+  done < <(collect_server_self_ipv6_cidrs)
   local self_cidrs_json
-  self_cidrs_json="$(jq -nc --arg ipv4 "${SERVER_IP}/32" '[$ipv4]')"
-  if [[ "${SERVER_IPV6:-false}" == "true" ]]; then
-    local -a self_v6=()
-    if [[ -n "${SSCTL_SELF_IPV6_OVERRIDE:-}" ]]; then
-      local v6_item
-      for v6_item in ${SSCTL_SELF_IPV6_OVERRIDE}; do
-        self_v6+=("${v6_item}/128")
-      done
-    elif command -v ip >/dev/null 2>&1; then
-      local v6_addr
-      while IFS= read -r v6_addr; do
-        [[ -n "${v6_addr}" ]] && self_v6+=("${v6_addr}/128")
-      done < <(ip -6 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | sort -u || true)
-    fi
-    if (( ${#self_v6[@]} > 0 )); then
-      self_cidrs_json="$(
-        printf '%s\n' "${SERVER_IP}/32" "${self_v6[@]}" | jq -R . | jq -sc .
-      )"
-    fi
-  fi
+  self_cidrs_json="$(printf '%s\n' "${self_cidrs[@]}" | jq -R . | jq -sc .)"
 
   jq \
     --arg strategy "${dns_strategy}" \
@@ -942,6 +928,9 @@ main() {
 
   if ! is_valid_ipv4 "${SERVER_IP}"; then
     die "SERVER_IP 不是合法的 IPv4 地址: ${SERVER_IP}"
+  fi
+  if is_non_public_ipv4 "${SERVER_IP}" "false"; then
+    die "SERVER_IP 不能为内网、回环、保留或广播地址: ${SERVER_IP}"
   fi
   if ! is_valid_domain "${SERVER_DOMAIN}"; then
     die "SERVER_DOMAIN 不是合法的小写域名（如 node.example.com）: ${SERVER_DOMAIN}"

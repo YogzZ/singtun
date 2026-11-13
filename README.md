@@ -5,7 +5,7 @@
 ### 核心特性
 
 - **单一固定出口，精准国内外分流**：多台设备（macOS、Windows、Linux、iOS）共用同一台 VPS 的固定公网 IPv4 作为国际出口；国内流量与私有网段本地直连，海外流量走代理，不引入任何改变出口 IP 的第三方中转。
-- **开箱即用的客户端防泄漏配置**：每次创建订阅会自动生成通用节点（`v2ray`）、`sing-box`、`mihomo (Clash.Meta)` 与 `Shadowrocket` 四种格式。其中 `sing-box.json` 与 `mihomo.yaml` 已内置虚拟网卡严格路由、国内外加密 DoH、IPv6 旁路阻断与海外 QUIC 自动降级，导入一条链接即可做到零国内 DNS 暴露。
+- **开箱即用的客户端防泄漏配置**：每次创建订阅会自动生成通用节点（`v2ray`）、`sing-box`、`mihomo (Clash.Meta)` 与 `Shadowrocket` 四种格式。其中 `sing-box.json` 与 `mihomo.yaml` 已内置虚拟网卡严格路由、国内外加密 DoH、IPv6 旁路阻断与海外 QUIC 自动降级，并自动通知 Apple 设备在代理通道下停用 iCloud 专用代理（防 Safari 卡死）、优先代理 Google / Firebase 核心域名，导入一条链接即可开箱即用且零国内 DNS 暴露。
 - **按设备独立订阅，一键轮换作废**：初始部署支持零预设用户待机；日常通过 `ssctl add` 为每台设备分配独立凭据与 256 位随机订阅链接，一旦怀疑链接外泄，执行 `ssctl reset <name>` 即可同时作废旧节点与旧链接。
 - **可选 Hysteria2 备用通道**：支持一键开启基于 QUIC 的 Hysteria2 备用入站（支持 UDP 端口跳跃与 `salamander` 混淆），在晚高峰 TCP 受限或高丢包网络下无缝切换。
 - **轻量、幂等、故障自回滚**：基于原生 Bash 脚本与 `systemd` 构建，无容器或常驻面板开销，1 核 / 512 MB 低配机器即可稳定运行；所有变更先离线校验再原子切换，任一步骤失败自动回滚。
@@ -45,8 +45,8 @@ sudo ./ssctl add iphone
 如果需要在终端直接用手机扫码导入，可追加 `--qr <类型>` 参数按需渲染单个二维码（支持 `v2ray`、`singbox`、`mihomo`、`sr`、`vless`、`hy2`）：
 
 ```bash
+./ssctl show iphone --qr singbox    # 渲染 sing-box 远程配置二维码（适合全平台官方 sing-box 客户端）
 ./ssctl show iphone --qr v2ray      # 渲染通用节点订阅二维码（适合 Shadowrocket / v2rayN）
-./ssctl show iphone --qr singbox    # 渲染 sing-box 远程配置二维码（适合 iOS / macOS SFM）
 ```
 
 > [!WARNING]
@@ -75,47 +75,49 @@ sudo ./ssctl add iphone
 
 ## 二、客户端选型与接入指南
 
-建议**为每台设备单独创建一个订阅**（如 `mac`、`win`、`linux`、`ios`），便于独立查看状态或单独重置凭据。每条订阅均提供以下 4 种格式的链接（本地副本保存在 `private/out/<name>/`）：
+建议**为每台设备单独创建一个订阅**（如 `mac`、`win`、`linux`、`ios`），便于独立查看状态或单独重置凭据。每条订阅会同时生成 4 种格式的链接（本地副本保存在 `private/out/<name>/`），它们包含的内容与适用场景如下：
 
-- **`[1] v2ray`**：Base64 通用节点订阅（仅包含节点连接信息，分流与 DNS 依赖客户端软件自身设置）。
-- **`[2] sing-box.json`**：`sing-box` 官方全托管 TUN 配置。
-- **`[3] mihomo.yaml`**：`Clash.Meta (mihomo)` 系客户端全托管 TUN 配置。
-- **`[4] shadowrocket.conf`**：iOS Shadowrocket 远程分流与加密 DNS 规则配置。
+| 编号与格式 | 包含节点凭据 | 内置 TUN 与防泄漏规则 | 内置服务器直连（防断 SSH） | 适用定位 |
+| :--- | :---: | :---: | :---: | :--- |
+| **`[2] sing-box.json`** | ✅ | ✅ | ✅ | **全平台首选**：`sing-box` 官方客户端一体化配置，单条链接包揽全部功能 |
+| **`[3] mihomo.yaml`** | ✅ | ✅ | ✅ | **Clash 系备选**：供 Clash Verge Rev / FlClash / Stash 一键远程订阅 |
+| **`[1] v2ray`** | ✅ | ❌ | ❌ | **纯节点列表**（Base64）：仅含节点连接参数，分流与 DNS 依赖软件自身配置 |
+| **`[4] shadowrocket.conf`** | ❌ | ✅ | ✅ | **纯分流与 DNS 规则包**：不含节点，专供 iOS Shadowrocket 搭配 `[1]` 成对使用 |
 
-### 2.1 为什么优先推荐 `[2] sing-box.json` 或 `[3] mihomo.yaml`？
+### 2.1 全平台推荐搭配（全系官方 `sing-box` 大一统）
 
-Claude（网页端、Desktop 客户端、Claude Code CLI）等对网络环境敏感的服务，会同时检测**出口 IP、DNS 解析出口所在地、IPv6 旁路以及 WebRTC 本地网卡泄漏**。
+部分对网络环境敏感的海外平台（涵盖网页端、桌面客户端与命令行工具）会同时检测**出口 IP、DNS 解析出口所在地、IPv6 旁路以及 WebRTC 本地网卡泄漏**。
 
-本项目生成的 `[2] sing-box.json` 与 `[3] mihomo.yaml` 属于**开箱即用的全托管配置**：已在配置文件内部锁定了虚拟网卡严格路由（`strict_route`）、海外域名远端 DoH 代理隧道解析、IPv6 彻底阻断、海外 `UDP 443` (QUIC) 本地拦截降级，以及启用 Hysteria2 时的主备自动测速策略组。客户端导入一条链接即可完整生效，无需手动逐项调整软件防泄漏开关。
+本项目生成的 **`[2] sing-box.json`**（及 Clash 系的 `[3] mihomo.yaml`）已在配置文件内部锁定了虚拟网卡严格路由（`strict_route`）、OS TUN 内核路由层（`route_exclude_address` / `route-exclude-address`）与规则层服务器公网 IP/域名双层直连（即使中途开关/重载 TUN 或切到 `Global` 模式也不会把本机 SSH 连接吸入代理隧道而被服务端防回环策略拦截）、海外域名远端加密 DoH 解析、IPv6 彻底阻断、海外 `UDP 443` (QUIC) 本地拦截降级，以及启用 Hysteria2 时的主备自动测速策略组。**全平台统一使用官方 `sing-box` 客户端导入 `[2] sing-box.json`**，即可获得完全一致的界面、同源内核协议兼容性与零手动调参体验：
 
 | 平台 | 推荐级别 | 客户端软件 | 核心优势 | 常驻内存 | 导入的订阅格式 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **macOS** | **首选** | **SFM** (`sing-box` 官方) | 与服务端同源内核，原生系统扩展 (`strict_route` + `ipv4_only`) | 30~50 MB | `[2] sing-box.json` |
-| | 备选 1 | **Clash Verge Rev** | 活跃开源 (`Tauri` + `mihomo`)，内置 `strict-route` 与 `fake-ip` | 60~90 MB | `[3] mihomo.yaml` |
-| | 备选 2 | **FlClash** | 开源 (`Flutter` + `mihomo`)，界面轻量跨平台一致 | 60~100 MB | `[3] mihomo.yaml` |
-| **Windows** | **首选** | **Clash Verge Rev** | 服务模式 + TUN 接管全系统与终端/WSL2，开机自启不弹 UAC | 50~80 MB | `[3] mihomo.yaml` |
-| | 备选 1 | **v2rayN** (自定义配置) | 老牌开源，作为自定义配置导入 `sing-box.json` 可完整保留防泄漏规则 | 45~70 MB | `[2] sing-box.json` |
-| | 备选 2 | **FlClash** | 不依赖系统 WebView2，开箱即用 | 70~100 MB | `[3] mihomo.yaml` |
-| **Linux** | **首选** | **原生 `sing-box` CLI** | 官方 APT 源签名安装，`systemd` 守护 `tun0` 全局路由，零 GUI 开销 | 20~35 MB | `[2] sing-box.json` |
-| | 备选 1 | **原生 `mihomo` CLI** | 单二进制配合 `.mrs` 高效规则集与 `fake-ip` | 30~45 MB | `[3] mihomo.yaml` |
-| | 备选 2 | **Clash Verge Rev / FlClash** | 官方提供 `.deb` 安装包，带桌面托盘图标 | 80~120 MB | `[3] mihomo.yaml` |
-| **iOS** | **首选 A** | **SFM** (`sing-box` 官方) | 100% 开源且与服务端同核，单条链接同时导入节点、分流与防泄漏策略 | < 50 MB | `[2] sing-box.json` |
-| | **首选 B** | **Shadowrocket** | 按需连接成熟省电，需同时导入 `[1]` 节点订阅与 `[4]` 远程配置 | < 50 MB | `[1] v2ray` + `[4] shadowrocket.conf` |
-| | 备选 | **Stash** | 兼容 `mihomo` 语法，单文件导入节点与分流规则 | < 50 MB | `[3] mihomo.yaml` |
+| **Windows** | **首选** | **sing-box for Desktop (`SFW`)** | 官方桌面客户端，内置守护服务托管虚拟网卡，退出自动清理无残留 | 40~70 MB | **`[2] sing-box.json`** |
+| | 备选 1 | **Clash Verge Rev** | 活跃开源 (`Tauri` + `mihomo`)，服务模式 + TUN 开机自启不弹 UAC | 50~80 MB | `[3] mihomo.yaml` |
+| | 备选 2 | **v2rayN** | 老牌开源，常规订阅导入 `[1]`（开启 Tun 时需手动添加服务器直连路由） | 45~70 MB | `[1] v2ray` |
+| **macOS** | **首选** | **sing-box for Apple (`SFM`)** | 官方客户端，原生系统网络扩展 (`strict_route` + `ipv4_only`) | 30~50 MB | **`[2] sing-box.json`** |
+| | 备选 | **Clash Verge Rev / FlClash** | 开源 `mihomo` 客户端，内置 `strict-route` 与 `fake-ip` | 60~90 MB | `[3] mihomo.yaml` |
+| **Linux** | **首选** | **原生 `sing-box` CLI / Desktop** | 无桌面用 APT 签名版 + `systemd` 守护；桌面端可用官方 `sing-box for Desktop` | 20~50 MB | **`[2] sing-box.json`** |
+| | 备选 | **原生 `mihomo` CLI / Clash Verge** | 单二进制或桌面托盘客户端，配合 `.mrs` 规则集 | 30~100 MB | `[3] mihomo.yaml` |
+| **iOS** | **首选 A** | **sing-box (`SFM`)** | 免费开源且与服务端同源内核，单条链接同时导入节点、分流与防泄漏策略 | < 50 MB | **`[2] sing-box.json`** |
+| | **首选 B** | **Shadowrocket** | 按需连接成熟省电，需同时导入 `[1]` 节点订阅与 `[4]` 远程规则配置 | < 50 MB | `[1] v2ray` + `[4] shadowrocket.conf` |
+| | 备选 | **Stash** | 兼容 `mihomo` 语法，单条链接导入节点与分流规则 | < 50 MB | `[3] mihomo.yaml` |
 
 ---
 
 ### 2.2 各平台接入步骤
 
-#### 1. macOS — SFM（首选）或 Clash Verge Rev
-- **SFM**：前往 [SagerNet/sing-box Releases](https://github.com/SagerNet/sing-box/releases) 下载最新 `SFM-1.14.*-universal.dmg`（若使用低于 `1.14.0` 的 App Store 版本，可在服务端 `.env` 设置 `SINGBOX_CLIENT_COMPAT=1.12` 后执行 `sudo ./ssctl flush`）。打开软件进入 `Profiles` → `New` → `Type: Remote`，粘贴 `[2] sing-box.json` 订阅 URL（或点击 `ssctl show` 输出的 `sing-box://` 一键导入深链），在 `Dashboard` 中启动并勾选 `Start At Login`。
-- **Clash Verge Rev**：在「订阅 (Profiles)」中粘贴 `[3] mihomo.yaml` 订阅链接导入，在设置中开启 **TUN 模式**。
+#### 1. Windows / macOS / iOS（桌面与移动端首选：官方 `sing-box` 客户端 + `[2] sing-box.json`）
 
-#### 2. Windows — Clash Verge Rev（首选）或 v2rayN
-- **Clash Verge Rev**：在「订阅 (Profiles)」中粘贴 `[3] mihomo.yaml` 订阅链接导入 → 进入「设置 (Settings)」点击 **服务模式 (Service Mode)** 右侧盾牌图标安装并启用 → 开启 **TUN (虚拟网卡) 模式**（此时可关闭“系统代理”，纯靠 TUN 即可接管桌面应用、命令行终端与 WSL2）。
-- **v2rayN**：为完整生效本项目的 DNS 防泄漏与 QUIC 拦截规则，建议下载 `[2] sing-box.json` 并通过「服务器 → 添加自定义配置服务器」导入（核心选择 `sing-box` 并以管理员身份运行，同时关闭 v2rayN 顶栏自带的 Tun 按钮以避免创建双虚拟网卡）。若仅在常规“订阅分组”中导入 `[1] v2ray`，请务必在 v2rayN 路由设置中手动添加 `udp:443 -> block` 并将 DNS 设为 `ipv4_only`。
+官方客户端在各平台的界面与导入流程完全一致：
+1. **下载安装官方客户端**：
+   - **Windows**：参考 [sing-box for Desktop 官方文档](https://sing-box.sagernet.org/clients/desktop/) 下载安装对应架构安装包（如 `SFW-1.14.*-x64.exe`）。*注：首次切换前请先彻底退出电脑上原有的 v2rayN / Clash 等代理软件，避免多张虚拟网卡冲突。*
+   - **macOS**：前往 [sing-box for Apple 官方文档](https://sing-box.sagernet.org/clients/apple/) 或 [GitHub Releases](https://github.com/SagerNet/sing-box/releases) 下载 `SFM-1.14.*-universal.dmg`。
+   - **iOS**：在非国区 App Store 搜索安装官方 **sing-box (`SFM`)**（若商店版本低于 `1.14.0`，可在服务端 `private/.env` 中设 `SINGBOX_CLIENT_COMPAT=1.12` 后运行 `sudo ./ssctl flush`）。
+2. **导入远程配置**：打开软件进入 **`Profiles`** → **`New`** → `Type` 选择 **`Remote`**，粘贴 **`[2] sing-box.json`** 订阅 URL 创建配置（或直接点击 `./ssctl show <name>` 输出的 `sing-box://` 深链一键导入）。
+3. **启动与切节点**：回到 **`Dashboard`** 打开开关即可接管全系统与命令行流量；开启 Hysteria2 时可在 **`Groups`** 页面随时切换 `vless-out`、`hy2-out` 或 `auto`。
 
-#### 3. Linux — 原生 `sing-box` CLI + systemd（首选）
+#### 2. Linux — 原生 `sing-box` CLI + systemd（服务器/无头环境首选）
 ```bash
 # 1. 下载官方 APT 源 GPG 公钥并核验主钥指纹，确认无误后安装 sing-box
 TMP_KEY="$(mktemp)"
@@ -138,13 +140,19 @@ sudo chmod 600 /etc/sing-box/config.json
 sudo sing-box check -c /etc/sing-box/config.json
 sudo systemctl enable --now sing-box
 ```
+> 若使用带桌面的 Linux 发行版，也可直接安装官方 [sing-box for Desktop](https://sing-box.sagernet.org/clients/desktop/) 并按第 1 节方式导入 `[2] sing-box.json`。
 
-#### 4. iOS — SFM（首选 A）或 Shadowrocket（首选 B，需非国区 Apple ID）
-- **SFM**：操作方式与 macOS 一致，直接导入 `[2] sing-box.json` 远程配置即可（若 App Store 版本为 1.12，在服务端设置 `SINGBOX_CLIENT_COMPAT=1.12` 后运行 `sudo ./ssctl flush`）。
-- **Shadowrocket 完整导入与设置核对清单**：
-  1. **添加节点订阅**：点击首页右上角 `+` → 类型选择 `Subscribe` → URL 粘贴 `[1] v2ray` 订阅链接（或扫描 `--qr v2ray` 二维码）。
-  2. **启用远程分流配置**：进入底部「配置」标签页 → 点击右上角 `+` → 粘贴 `[4] shadowrocket.conf` 链接下载 → 点击该配置文件并选择 **「使用配置」**（若此前手动修改过本地配置，可点击右侧 `ⓘ` → **「更新」** 恢复标准参数）。
-  3. **核对关键开关**（避免历史设置干扰分流或造成断流）：
+#### 3. 备选桌面客户端（Clash Verge Rev / v2rayN）
+- **Clash Verge Rev（Windows / macOS / Linux）**：在「订阅 (Profiles)」中粘贴 **`[3] mihomo.yaml`** 链接导入 → 进入「设置」安装并启用 **服务模式 (Service Mode)** → 开启 **TUN 模式**即可。
+- **v2rayN（Windows）**：在「订阅分组设置」中粘贴 **`[1] v2ray`** 链接更新节点。若开启 v2rayN 底部的 **「启用 Tun」** 开关，建议改用 **`[2] sing-box.json`** 或 **`[3] mihomo.yaml`** 以自动完成内核路由排除；若继续使用 `[1] v2ray`，请务必在「设置 → 路由设置」当前启用的规则集（如 `绕过大陆`）与 Tun 设置中：
+  1. **置顶第 1 行**添加独立直连规则：`OutboundTag = direct`、`IP = <VPS公网IP>/32`（其余字段留空）；同时在 Tun 设置的路由排除地址中填入 `<VPS公网IP>/32`，防止开关 TUN 或全局模式下本机 SSH 被吸入代理隧道遭服务端防回环策略拒绝；
+  2. 添加海外 QUIC 拦截规则：`OutboundTag = block`、协议 `udp`、端口 `443`；
+  3. 关闭软件时需在右下角系统托盘右键点击「退出」，避免后台 `sing-box.exe` 虚拟网卡进程驻留。
+
+#### 4. iOS 备选 — Shadowrocket（需同时导入 `[1]` 节点与 `[4]` 规则）
+1. **添加节点订阅**：点击首页右上角 `+` → 类型选择 `Subscribe` → URL 粘贴 **`[1] v2ray`** 订阅链接（或扫描 `--qr v2ray` 二维码）。
+2. **启用远程分流配置**：进入底部「配置」标签页 → 点击右上角 `+` → 粘贴 **`[4] shadowrocket.conf`** 链接下载 → 点击该配置文件并选择 **「使用配置」**（若此前手动改过本地配置，可点右侧 `ⓘ` → **「更新」** 恢复标准参数）。
+3. **核对关键开关**（避免历史设置干扰分流或造成断流）：
 
 | 菜单路径 | 推荐设置 | 作用说明 |
 | :--- | :--- | :--- |
@@ -211,7 +219,9 @@ sudo systemctl enable --now sing-box
 - **SFM 导入 `sing-box.json` 提示配置字段不支持**
   检查客户端版本是否低于 `1.14.0`（如部分旧版 App Store 客户端）。若是旧版本，在 `private/.env` 中设置 `SINGBOX_CLIENT_COMPAT=1.12` 后运行 `sudo ./ssctl flush` 即可切换为兼容语法。
 - **客户端首次启动无法下载分流规则集**
-  `sing-box.json` 与 `mihomo.yaml` 已内置“经由代理隧道下载规则集”的机制；`Shadowrocket` 已内置 90+ 条高频国内域名后缀作为本地直连兜底，也可在 `private/.env` 中将 `RULESET_SR_CN_DOMAIN` 替换为可用的镜像地址后执行 `sudo ./ssctl flush`。
+  `sing-box.json` 与 `mihomo.yaml` 已内置“经由代理隧道下载规则集”的机制；`Shadowrocket` 已内置 100+ 条高频国内域名后缀作为本地直连兜底，也可在 `private/.env` 中将 `RULESET_SR_CN_DOMAIN` 替换为可用的镜像地址后执行 `sudo ./ssctl flush`。
+- **iOS / macOS Safari 启用代理后网页卡死或 Google 登录/静态资源加载超时**
+  新版客户端配置已在三端（`sing-box.json`、`mihomo.yaml`、`shadowrocket.conf`）前置抑制 iCloud 专用代理（Private Relay）探针域名（不影响 iCloud 云盘/相册等正常功能），并将 Google / `.google` / `gstatic` / `googleapis` / Firebase 等易受上游历史直连规则影响的后缀前置走代理与远端加密 DoH。若在更新前曾导入过旧配置，请在客户端内手动刷新订阅/远程配置并重连代理。
 - **客户端连接超时，无法访问海外网站**
   1. 在 VPS 上运行 `sudo ./ssctl status` 与 `sudo ./ssctl logs` 查看服务是否正常监听；
   2. 检查 Cloudflare 控制台，确认连接子域名的代理状态为 **DNS only（灰色云朵）** 而非橙色云；
@@ -234,7 +244,7 @@ sudo systemctl enable --now sing-box
 ### 4.1 整体拓扑与组件职责
 
 ```text
-客户端 (SFM / Clash Verge Rev / FlClash / v2rayN / sing-box CLI / Shadowrocket)
+客户端 (官方 sing-box SFW/SFM/SFA/CLI | Clash Verge Rev | Shadowrocket | v2rayN)
    │  出站 server = 直接填 VPS IP（DNS 与路由中将 SERVER_DOMAIN 与 SERVER_IP/32 显式直连防回环）
    │  TLS SNI     = 自有子域名（Cloudflare DNS only）
    ├─ 主通道 (TCP 443): VLESS + uTLS (chrome) + REALITY + xtls-rprx-vision

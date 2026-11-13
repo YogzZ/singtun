@@ -19,7 +19,47 @@
         "server": "dns-direct"
       },
       {
+        "domain": [
+          "mask.icloud.com",
+          "mask-h2.icloud.com",
+          "mask-api.icloud.com"
+        ],
+        "action": "predefined",
+        "rcode": "NXDOMAIN"
+      },
+      {
         "clash_mode": "global",
+        "server": "dns-remote"
+      },
+      {
+        "domain_suffix": [
+          "google",
+          "google.com",
+          "gstatic.com",
+          "googleapis.com",
+          "googleusercontent.com",
+          "ggpht.com",
+          "1e100.net",
+          "gvt1.com",
+          "gvt2.com",
+          "gvt3.com",
+          "appspot.com",
+          "firebaseio.com",
+          "firebaseapp.com",
+          "crashlytics.com",
+          "app-analytics-services.com",
+          "app-measurement.com",
+          "googletagmanager.com",
+          "googletagservices.com",
+          "google-analytics.com",
+          "googlesyndication.com",
+          "doubleclick.net",
+          "2mdn.net",
+          "recaptcha.net",
+          "pki.goog",
+          "ampproject.org",
+          "android.com"
+        ],
         "server": "dns-remote"
       },
       {

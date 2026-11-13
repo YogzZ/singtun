@@ -39,6 +39,8 @@ tun:
   auto-detect-interface: true
   inet6-address:
     - fdfe:dcba:9876::1/126
+  route-exclude-address:
+__MIHOMO_TUN_ROUTE_EXCLUDE__
   dns-hijack:
     - any:53
     - tcp://any:53
@@ -66,6 +68,7 @@ dns:
     - "ntp.*.com"
     - "+.pool.ntp.org"
     - "__SERVER_DOMAIN__"
+__MIHOMO_FAKE_IP_FILTER_CANARIES__
   default-nameserver:
     - "https://__DNS_DIRECT__/dns-query"
   proxy-server-nameserver:
@@ -75,6 +78,7 @@ dns:
   nameserver-policy:
     "__SERVER_DOMAIN__":
       - "https://__DNS_DIRECT__/dns-query"
+__MIHOMO_NAMESERVER_POLICY_OVERRIDES__
     "rule-set:geosite-cn":
       - "https://__DNS_DIRECT__/dns-query"
   nameserver:
@@ -128,13 +132,17 @@ rules:
   - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
   - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
   - DOMAIN,__SERVER_DOMAIN__,DIRECT
-  - IP-CIDR,__SERVER_IP__/32,DIRECT,no-resolve
+__MIHOMO_SELF_IP_DIRECT_RULES__
   # 2. 服务端无 IPv6 时拒绝公网 IPv6 流量防止绕过
   __MIHOMO_IPV6_RULE__
-  # 3. 中国大陆域名与 IP 直连
+  # 3. 阻断 Apple iCloud 专用代理（Private Relay）金丝雀与控制面域名，防 MASQUE UDP 443 死锁或改变出口 IP
+__MIHOMO_PRIVATE_RELAY_RULES__
+  # 4. 前置 Google / .google / Firebase 核心后缀走代理（先拦截 UDP 443 抑制 QUIC，防止命中上游 @cn 历史规则直连超时）
+__MIHOMO_OVERSEAS_PRIORITY_RULES__
+  # 5. 中国大陆域名与 IP 直连
   - RULE-SET,geosite-cn,DIRECT
   - RULE-SET,geoip-cn,DIRECT,no-resolve
-  # 4. 拒绝海外 QUIC (UDP 443)，迫使回退至 TCP 以发挥 Vision 消除特征
+  # 6. 拒绝海外 QUIC (UDP 443)，迫使回退至 TCP 以发挥 Vision 消除特征
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
-  # 5. 其余全部走固定出口代理
+  # 7. 其余全部走固定出口代理
   - MATCH,PROXY

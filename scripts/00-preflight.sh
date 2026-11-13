@@ -187,6 +187,13 @@ main() {
   if ! is_valid_ipv4 "${SERVER_IP}"; then
     die "SERVER_IP 不是合法的 IPv4 地址: ${SERVER_IP}"
   fi
+  local reject_doc_ip="false"
+  if [[ "${SKIP_OS_CHECK:-false}" != "true" && "${SKIP_DNS_CHECK:-false}" != "true" ]]; then
+    reject_doc_ip="true"
+  fi
+  if is_non_public_ipv4 "${SERVER_IP}" "${reject_doc_ip}"; then
+    die "SERVER_IP 不能为内网、回环、保留或文档示例地址: ${SERVER_IP}"
+  fi
   if ! is_valid_domain "${SERVER_DOMAIN}"; then
     die "SERVER_DOMAIN 不是合法的小写域名（如 node.example.com）: ${SERVER_DOMAIN}"
   fi
@@ -232,6 +239,15 @@ main() {
   fi
   if ! is_valid_reality_key "${REALITY_PUBLIC_KEY}"; then
     die "REALITY_PUBLIC_KEY 格式非法（须为 43 位 URL-safe Base64 X25519 公钥）"
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    local expected_reality_pub=""
+    if ! expected_reality_pub="$(derive_reality_public_key "${REALITY_PRIVATE_KEY}")"; then
+      die "无法由 REALITY_PRIVATE_KEY 派生 X25519 公钥，请检查私钥格式是否有效！"
+    fi
+    if [[ "${REALITY_PUBLIC_KEY}" != "${expected_reality_pub}" ]]; then
+      die "REALITY_PUBLIC_KEY 与 REALITY_PRIVATE_KEY 不匹配（当前: ${REALITY_PUBLIC_KEY}，预期: ${expected_reality_pub}）；请修正或清空 REALITY_PUBLIC_KEY 后重跑 ./ssctl init 自动修复。"
+    fi
   fi
   if ! is_valid_utls_fingerprint "${UTLS_FINGERPRINT}"; then
     die "UTLS_FINGERPRINT 不在受支持的指纹列表内 (chrome|firefox|edge|safari|360|qq|ios|android|random|randomized): ${UTLS_FINGERPRINT}"
