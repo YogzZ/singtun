@@ -1,18 +1,39 @@
 #!/usr/bin/env bash
-# ssctl — 个人跨境代理服务端部署与多端订阅管理 CLI
+# singtun — 个人跨境代理服务端部署与多端订阅管理 CLI
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_resolve_self_path() {
+  local p="${BASH_SOURCE[0]}"
+  if command -v readlink >/dev/null 2>&1; then
+    local resolved=""
+    if resolved="$(readlink -f "${p}" 2>/dev/null)" && [[ -n "${resolved}" ]]; then
+      printf '%s\n' "${resolved}"
+      return 0
+    fi
+  fi
+  local dir=""
+  while [[ -L "${p}" ]]; do
+    dir="$(cd -P "$(dirname "${p}")" && pwd)"
+    p="$(readlink "${p}")"
+    [[ "${p}" == /* ]] || p="${dir}/${p}"
+  done
+  dir="$(cd -P "$(dirname "${p}")" && pwd)"
+  printf '%s/%s\n' "${dir}" "$(basename "${p}")"
+}
+
+SELF_PATH="$(_resolve_self_path)"
+REPO_ROOT="$(cd "$(dirname "${SELF_PATH}")" && pwd)"
 # shellcheck source=scripts/lib/common.sh
 source "${REPO_ROOT}/scripts/lib/common.sh"
 
 usage() {
   cat <<'EOF'
-用法: ./ssctl <command> [args]
+用法: ./singtun <command> [args]
 
 部署与生命周期:
-  init                              从 examples/ 初始化 private/，生成 REALITY 密钥对、short_id 与随机订阅前缀
-  deploy                            依次执行 00-preflight → 10-harden → 20-optimize → 30-cert → 40-deploy-server
+  setup [--config-only]             交互式配置向导并一键部署（智能默认值、DNS 实时核验与首条订阅创建）
+  init                              从 examples/ 初始化 private/，生成 REALITY 密钥对、short_id、随机前缀与全量默认项
+  deploy                            依次执行 00-preflight → 10-harden → 20-optimize → 30-cert → 40-deploy-server（非交互）
   upgrade <version>                 先暂存候选二进制完成配置预检，再升级版本并同步配置；失败自动无损回滚
   uninstall [--purge-cert]          移除服务、配置、Nginx 站点及防火墙/nftables 规则，保留 private/（默认保留证书）
 
@@ -40,9 +61,26 @@ EOF
 print_command_help() {
   local cmd="$1"
   case "${cmd}" in
+    setup)
+      cat <<'EOF'
+用法: sudo ./singtun setup [--config-only]
+
+功能说明:
+  交互式引导填写核心 4 项（连接域名、公网 IPv4 自动探测、Cloudflare API Token、证书邮箱自动推导），
+  实时核验域名 DNS 解析是否指向本机、提供 3 档部署方案菜单（标准推荐 / Hysteria2 备用 / 高级自定义），
+  并在写入 private/.env 后自动执行非交互式 deploy，随后提示创建首条订阅与二维码。
+
+选项:
+  --config-only                     仅引导生成并保存 private/.env，不执行服务端部署（无需 root）
+
+示例:
+  sudo ./singtun setup
+  ./singtun setup --config-only
+EOF
+      ;;
     init)
       cat <<'EOF'
-用法: ./ssctl init
+用法: ./singtun init
 
 功能说明:
   从 examples/ 初始化 private/.env 与 private/host-facts.md，自动生成 REALITY 密钥对、
@@ -52,12 +90,12 @@ print_command_help() {
   幂等安全。若 private/.env 已存在，仅补全缺失项，不会覆盖已有密钥或影响线上订阅。
 
 示例:
-  ./ssctl init
+  ./singtun init
 EOF
       ;;
     deploy)
       cat <<'EOF'
-用法: sudo ./ssctl deploy
+用法: sudo ./singtun deploy
 
 功能说明:
   依次执行 00-preflight → 10-harden → 20-optimize → 30-cert → 40-deploy-server，
@@ -67,12 +105,12 @@ EOF
   幂等重部署。sing-box 会短暂重启约 1 秒（活跃连接自动重连），已有订阅链接与节点凭据保持不变。
 
 示例:
-  sudo ./ssctl deploy
+  sudo ./singtun deploy
 EOF
       ;;
     add)
       cat <<'EOF'
-用法: sudo ./ssctl add [name] [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]
+用法: sudo ./singtun add [name] [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]
 
 功能说明:
   创建一条独立订阅（省略 name 时自动编号为 sub-1、sub-2...），分配独立 UUID 与 256-bit 订阅令牌，
@@ -82,14 +120,14 @@ EOF
   sing-box 短暂重启约 1 秒以加载新用户；其他已有订阅不受影响。
 
 示例:
-  sudo ./ssctl add
-  sudo ./ssctl add iphone
-  sudo ./ssctl add iphone --qr v2ray
+  sudo ./singtun add
+  sudo ./singtun add iphone
+  sudo ./singtun add iphone --qr v2ray
 EOF
       ;;
     list)
       cat <<'EOF'
-用法: ./ssctl list
+用法: ./singtun list
 
 功能说明:
   列出公网订阅托管开关状态 (ENABLE_SUBSCRIPTION) 及当前已创建的所有订阅名称列表。
@@ -99,12 +137,12 @@ EOF
   只读操作，无任何修改。
 
 示例:
-  ./ssctl list
+  ./singtun list
 EOF
       ;;
     show)
       cat <<'EOF'
-用法: ./ssctl show <name> [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]
+用法: ./singtun show <name> [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]
 
 功能说明:
   查看指定订阅的 4 种专属客户端订阅 URL（v2ray / sing-box.json / mihomo.yaml / shadowrocket.conf）、
@@ -114,13 +152,13 @@ EOF
   只读操作，无任何修改。
 
 示例:
-  ./ssctl show iphone
-  ./ssctl show iphone --qr singbox
+  ./singtun show iphone
+  ./singtun show iphone --qr singbox
 EOF
       ;;
     reset)
       cat <<'EOF'
-用法: sudo ./ssctl reset <name> [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]
+用法: sudo ./singtun reset <name> [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]
 
 功能说明:
   重置指定订阅的 UUID（含同源派生的 Hysteria2 密码）与 256-bit 订阅 Token，
@@ -130,13 +168,13 @@ EOF
   该订阅原有的节点凭据与旧订阅 URL 立即同时作废（需在客户端重新导入新链接）；其他订阅不受影响。
 
 示例:
-  sudo ./ssctl reset iphone
-  sudo ./ssctl reset iphone --qr v2ray
+  sudo ./singtun reset iphone
+  sudo ./singtun reset iphone --qr v2ray
 EOF
       ;;
     del)
       cat <<'EOF'
-用法: sudo ./ssctl del <name>
+用法: sudo ./singtun del <name>
 
 功能说明:
   吊销并彻底删除指定订阅，从服务端移除对应入站用户，并清理本地 private/out/<name>/ 与公网订阅产物。
@@ -145,31 +183,31 @@ EOF
   该订阅立即失效并断开连接；其他订阅不受影响。
 
 示例:
-  sudo ./ssctl del iphone
+  sudo ./singtun del iphone
 EOF
       ;;
     flush)
       cat <<'EOF'
-用法: sudo ./ssctl flush [name] [--local-only]
+用法: sudo ./singtun flush [name] [--local-only]
 
 功能说明:
   根据当前 private/.env 与客户端模板，重新渲染全部（或指定）订阅的 4 种客户端配置文件，
-  并通过符号链接原子切换同步至公网订阅目录 /var/lib/ssctl/sub-web（传入 --local-only 则仅更新本地 private/out/）。
+  并通过符号链接原子切换同步至公网订阅目录 /var/lib/singtun/sub-web（传入 --local-only 则仅更新本地 private/out/）。
 
 对现有服务与订阅的影响:
   不重启服务端 sing-box，不改变任何订阅的 UUID 或 Token（订阅链接不变）。
   适合修改了客户端相关参数（如 SINGBOX_CLIENT_COMPAT、DNS、规则集地址）或客户端模板后刷新产物；
-  若修改了服务端协议、混淆或端口（如 ENABLE_HY2、HY2_OBFS、HY2_HOP_PORTS），请执行 'sudo ./ssctl deploy'。
+  若修改了服务端协议、混淆或端口（如 ENABLE_HY2、HY2_OBFS、HY2_HOP_PORTS），请执行 'sudo ./singtun deploy'。
 
 示例:
-  sudo ./ssctl flush
-  sudo ./ssctl flush iphone
-  ./ssctl flush --local-only
+  sudo ./singtun flush
+  sudo ./singtun flush iphone
+  ./singtun flush --local-only
 EOF
       ;;
     check)
       cat <<'EOF'
-用法: ./ssctl check
+用法: ./singtun check
 
 功能说明:
   在隔离临时目录中离线渲染服务端（sing-box + Nginx + 多态回落站）与 4 种客户端配置，
@@ -179,27 +217,27 @@ EOF
   纯离线只读校验，不改动系统任何文件或服务。
 
 示例:
-  ./ssctl check
+  ./singtun check
 EOF
       ;;
     status)
       cat <<'EOF'
-用法: sudo ./ssctl status
+用法: sudo ./singtun status
 
 功能说明:
-  查看 sing-box、nginx（及已启用的 ssctl-vless-guard、ssctl-hy2-hop）的 systemd 运行状态，
+  查看 sing-box、nginx（及已启用的 singtun-vless-guard、singtun-hy2-hop）的 systemd 运行状态，
   并检查 TLS 证书剩余有效天数（低于 20 天或已过期时给出告警）。
 
 对现有服务与订阅的影响:
   只读操作，无任何修改。
 
 示例:
-  sudo ./ssctl status
+  sudo ./singtun status
 EOF
       ;;
     logs)
       cat <<'EOF'
-用法: sudo ./ssctl logs
+用法: sudo ./singtun logs
 
 功能说明:
   通过 journalctl 实时跟踪 sing-box 与 nginx 的 systemd 服务日志（按 Ctrl+C 退出）。
@@ -208,27 +246,27 @@ EOF
   只读操作，无任何修改。
 
 示例:
-  sudo ./ssctl logs
+  sudo ./singtun logs
 EOF
       ;;
     restart)
       cat <<'EOF'
-用法: sudo ./ssctl restart
+用法: sudo ./singtun restart
 
 功能说明:
-  直接重启 nginx、sing-box 及已启用的 ssctl-vless-guard / ssctl-hy2-hop 单元（不重新渲染配置文件）。
-  注：若修改了 private/.env 参数，请执行 'sudo ./ssctl deploy' 或 'sudo ./ssctl flush'。
+  直接重启 nginx、sing-box 及已启用的 singtun-vless-guard / singtun-hy2-hop 单元（不重新渲染配置文件）。
+  注：若修改了 private/.env 参数，请执行 'sudo ./singtun deploy' 或 'sudo ./singtun flush'。
 
 对现有服务与订阅的影响:
   服务短暂重启约 1 秒，已有订阅与凭据不变。
 
 示例:
-  sudo ./ssctl restart
+  sudo ./singtun restart
 EOF
       ;;
     renew)
       cat <<'EOF'
-用法: sudo ./ssctl renew
+用法: sudo ./singtun renew
 
 功能说明:
   调用 acme.sh --force 忽略剩余有效期强制重新签发 Let's Encrypt 证书，并按需重载服务。
@@ -238,12 +276,12 @@ EOF
   Nginx 平滑 reload（启用 ENABLE_HY2=true 时同步重启 sing-box），已有订阅不受影响。
 
 示例:
-  sudo ./ssctl renew
+  sudo ./singtun renew
 EOF
       ;;
     upgrade)
       cat <<'EOF'
-用法: sudo ./ssctl upgrade <version>
+用法: sudo ./singtun upgrade <version>
 
 功能说明:
   先将目标版本官方安装包下载（或验证本地包）并解压至临时隔离目录，以暂存的候选 sing-box 二进制
@@ -253,24 +291,24 @@ EOF
   sing-box 短暂重启切换版本，已有订阅与凭据不变。
 
 示例:
-  sudo ./ssctl upgrade 1.14.4
+  sudo ./singtun upgrade 1.14.4
 EOF
       ;;
     uninstall)
       cat <<'EOF'
-用法: sudo ./ssctl uninstall [--purge-cert]
+用法: sudo ./singtun uninstall [--purge-cert]
 
 功能说明:
   停止并移除 sing-box 服务覆盖配置、Nginx 回落站点与调优项、公网订阅目录、内核与日志调优参数，
-  以及代理相关的 UFW 规则与 nftables 表（ssctl_guard / ssctl_hy2）。
-  始终保留宿主活跃 SSH 规则与 private/ 目录；默认保留 /etc/ssctl/cert/ 证书以免重装触发限流，加 --purge-cert 可一并删除证书。
+  以及代理相关的 UFW 规则与 nftables 表（singtun_guard / singtun_hy2）。
+  始终保留宿主活跃 SSH 规则与 private/ 目录；默认保留 /etc/singtun/cert/ 证书以免重装触发限流，加 --purge-cert 可一并删除证书。
 
 对现有服务与订阅的影响:
-  代理服务与公网订阅停止；因保留了 private/.env，日后重新运行 'sudo ./ssctl deploy' 即可原样恢复全部订阅。
+  代理服务与公网订阅停止；因保留了 private/.env，日后重新运行 'sudo ./singtun deploy' 即可原样恢复全部订阅。
 
 示例:
-  sudo ./ssctl uninstall
-  sudo ./ssctl uninstall --purge-cert
+  sudo ./singtun uninstall
+  sudo ./singtun uninstall --purge-cert
 EOF
       ;;
     help)
@@ -290,7 +328,7 @@ cmd_help() {
     return 0
   fi
   if (( $# > 1 )); then
-    die "多余的参数: $2（用法: ./ssctl help [command]）"
+    die "多余的参数: $2（用法: ./singtun help [command]）"
   fi
   case "$1" in
     -h|--help)
@@ -401,10 +439,10 @@ validate_nginx_rendered_config() {
 
   local site_check_conf="${srv_dir}/nginx/site-check.conf"
   sed \
-    -e "s|/etc/ssctl/cert/fullchain.pem|${srv_dir}/cert/fullchain.pem|g" \
-    -e "s|/etc/ssctl/cert/key.pem|${srv_dir}/cert/key.pem|g" \
-    -e "s|/var/www/ssctl-site|${srv_dir}/www|g" \
-    -e "s|/var/lib/ssctl/sub-web|${srv_dir}/sub-web|g" \
+    -e "s|/etc/singtun/cert/fullchain.pem|${srv_dir}/cert/fullchain.pem|g" \
+    -e "s|/etc/singtun/cert/key.pem|${srv_dir}/cert/key.pem|g" \
+    -e "s|/var/www/singtun-site|${srv_dir}/www|g" \
+    -e "s|/var/lib/singtun/sub-web|${srv_dir}/sub-web|g" \
     "${site_conf}" > "${site_check_conf}"
 
   local wrapper_conf="${srv_dir}/nginx-wrapper.conf"
@@ -450,13 +488,13 @@ assert_no_args() {
   local cmd_name="$1"
   shift
   if (( $# > 0 )); then
-    die "多余的参数: $1（用法: ./ssctl ${cmd_name}）"
+    die "多余的参数: $1（用法: ./singtun ${cmd_name}）"
   fi
 }
 
 cmd_init() {
   assert_no_args "init" "$@"
-  acquire_ssctl_lock
+  acquire_singtun_lock
   ensure_private_dir_permissions
 
   if [[ ! -f "${ENV_FILE}" ]]; then
@@ -475,6 +513,14 @@ cmd_init() {
   else
     chmod 600 "${PRIVATE_DIR}/host-facts.md" 2>/dev/null || true
   fi
+
+  local -a raw_keys=() raw_vals=()
+  parse_env_data_file "${ENV_FILE}" "true" raw_keys raw_vals
+  local -A raw_env_map=()
+  local idx
+  for idx in "${!raw_keys[@]}"; do
+    raw_env_map["${raw_keys[${idx}]}"]="${raw_vals[${idx}]}"
+  done
 
   load_env
 
@@ -503,21 +549,34 @@ cmd_init() {
     need_sid="true"
   fi
 
-  if [[ -z "${SERVER_LOG_LEVEL:-}" ]]; then
-    init_ops+=("SET:SERVER_LOG_LEVEL=warn")
-  fi
-
-  if [[ -z "${SINGBOX_CLIENT_COMPAT:-}" ]]; then
-    init_ops+=("SET:SINGBOX_CLIENT_COMPAT=1.14")
-  fi
-
-  if [[ -z "${ENABLE_SUBSCRIPTION:-}" ]]; then
-    init_ops+=("SET:ENABLE_SUBSCRIPTION=true")
-  fi
-
-  if [[ -z "${HY2_OBFS:-}" ]]; then
-    init_ops+=("SET:HY2_OBFS=false")
-  fi
+  local -a default_pairs=(
+    "SINGBOX_VERSION=${DEFAULT_SINGBOX_VERSION}"
+    "SINGBOX_CLIENT_COMPAT=${DEFAULT_SINGBOX_CLIENT_COMPAT}"
+    "SERVER_IPV6=${DEFAULT_SERVER_IPV6}"
+    "SERVER_LOG_LEVEL=${DEFAULT_SERVER_LOG_LEVEL}"
+    "VLESS_PORT=${DEFAULT_VLESS_PORT}"
+    "REALITY_HANDSHAKE_PORT=${DEFAULT_REALITY_HANDSHAKE_PORT}"
+    "UTLS_FINGERPRINT=${DEFAULT_UTLS_FINGERPRINT}"
+    "ENABLE_HY2=${DEFAULT_ENABLE_HY2}"
+    "HY2_PORT=${DEFAULT_HY2_PORT}"
+    "HY2_OBFS=${DEFAULT_HY2_OBFS}"
+    "ENABLE_SUBSCRIPTION=${DEFAULT_ENABLE_SUBSCRIPTION}"
+    "DNS_DIRECT=${DEFAULT_DNS_DIRECT}"
+    "DNS_REMOTE=${DEFAULT_DNS_REMOTE}"
+    "RULESET_GEOSITE_CN=${DEFAULT_RULESET_GEOSITE_CN}"
+    "RULESET_GEOIP_CN=${DEFAULT_RULESET_GEOIP_CN}"
+    "RULESET_MIHOMO_GEOSITE_CN=${DEFAULT_RULESET_MIHOMO_GEOSITE_CN}"
+    "RULESET_MIHOMO_GEOIP_CN=${DEFAULT_RULESET_MIHOMO_GEOIP_CN}"
+    "RULESET_SR_CN_DOMAIN=${DEFAULT_RULESET_SR_CN_DOMAIN}"
+  )
+  local pair dk dv
+  for pair in "${default_pairs[@]}"; do
+    dk="${pair%%=*}"
+    dv="${pair#*=}"
+    if [[ -z "${raw_env_map[${dk}]:-}" ]]; then
+      init_ops+=("SET:${dk}=${dv}")
+    fi
+  done
 
   if [[ -z "${SUB_PATH_PREFIX:-}" ]]; then
     gen_pfx="$(generate_sub_prefix)"
@@ -570,18 +629,18 @@ cmd_init() {
 cmd_deploy() {
   assert_no_args "deploy" "$@"
   require_root
-  acquire_ssctl_lock
+  acquire_singtun_lock
   bash "${REPO_ROOT}/scripts/00-preflight.sh"
-  SSCTL_DEFER_UFW_PRUNE=true bash "${REPO_ROOT}/scripts/10-harden.sh"
+  SINGTUN_DEFER_UFW_PRUNE=true bash "${REPO_ROOT}/scripts/10-harden.sh"
   bash "${REPO_ROOT}/scripts/20-optimize.sh"
   bash "${REPO_ROOT}/scripts/30-cert.sh"
   bash "${REPO_ROOT}/scripts/40-deploy-server.sh"
   bash "${REPO_ROOT}/scripts/10-harden.sh" --post-deploy-sync
-  log_info "全部部署阶段 (00 → 40) 执行完毕！可通过 'sudo ./ssctl add [name]' 按需创建客户端订阅。"
+  log_info "全部部署阶段 (00 → 40) 执行完毕！可通过 'sudo ./singtun add [name]' 按需创建客户端订阅。"
 }
 
 require_sub_write_privilege() {
-  if [[ "${SSCTL_ALLOW_NONROOT_SUB:-false}" != "true" ]]; then
+  if [[ "${SINGTUN_ALLOW_NONROOT_SUB:-false}" != "true" ]]; then
     require_root
   fi
 }
@@ -620,14 +679,14 @@ sync_runtime_after_sub_change() {
   if is_server_deployed; then
     log_info "正在同步更新 sing-box 入站配置（服务短暂重启约 1 秒，现有连接将自动重连）..."
     bash "${REPO_ROOT}/scripts/40-deploy-server.sh" --sync-singbox-only || return 1
-    SSCTL_DEFER_RELEASE_PRUNE=true bash "${REPO_ROOT}/scripts/50-gen-clients.sh" || return 1
-  elif [[ -n "${SSCTL_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
-    SSCTL_DEFER_RELEASE_PRUNE=true bash "${REPO_ROOT}/scripts/50-gen-clients.sh" || return 1
+    SINGTUN_DEFER_RELEASE_PRUNE=true bash "${REPO_ROOT}/scripts/50-gen-clients.sh" || return 1
+  elif [[ -n "${SINGTUN_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
+    SINGTUN_DEFER_RELEASE_PRUNE=true bash "${REPO_ROOT}/scripts/50-gen-clients.sh" || return 1
   else
     bash "${REPO_ROOT}/scripts/50-gen-clients.sh" --local-only || return 1
-    log_warn "检测到服务端尚未完成首次部署（sing-box 未启用）：已更新 ${ENV_FILE} 与本地配置，请运行 'sudo ./ssctl deploy' 上线服务与公网订阅。"
+    log_warn "检测到服务端尚未完成首次部署（sing-box 未启用）：已更新 ${ENV_FILE} 与本地配置，请运行 'sudo ./singtun deploy' 上线服务与公网订阅。"
   fi
-  if [[ "${SSCTL_FAIL_AFTER_SUB_SYNC:-false}" == "true" ]]; then
+  if [[ "${SINGTUN_FAIL_AFTER_SUB_SYNC:-false}" == "true" ]]; then
     log_error "注入测试故障：订阅同步完成后触发失败"
     return 1
   fi
@@ -644,7 +703,7 @@ save_local_snapshot() {
     cp -a "${PRIVATE_DIR}/out" "${snap_dir}/out"
   fi
 
-  local sub_web_base="${SSCTL_SUB_WEB_BASE_OVERRIDE:-/var/lib/ssctl}"
+  local sub_web_base="${SINGTUN_SUB_WEB_BASE_OVERRIDE:-/var/lib/singtun}"
   local sub_web_link="${sub_web_base}/sub-web"
   local sub_rel_dir="${sub_web_base}/releases"
   : > "${snap_dir}/pre_releases.list"
@@ -693,11 +752,11 @@ restore_local_snapshot() {
 
 restore_sub_web_snapshot() {
   local snap_dir="$1"
-  if [[ "${EUID:-$(id -u)}" -ne 0 && -z "${SSCTL_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
+  if [[ "${EUID:-$(id -u)}" -ne 0 && -z "${SINGTUN_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
     return 0
   fi
 
-  local sub_web_base="${SSCTL_SUB_WEB_BASE_OVERRIDE:-/var/lib/ssctl}"
+  local sub_web_base="${SINGTUN_SUB_WEB_BASE_OVERRIDE:-/var/lib/singtun}"
   local sub_web_link="${sub_web_base}/sub-web"
   local sub_rel_dir="${sub_web_base}/releases"
   local ok="true"
@@ -785,7 +844,7 @@ apply_sub_env_and_sync() {
     die "订阅操作失败，已完整回滚至操作前状态。"
   fi
 
-  if [[ "${EUID:-$(id -u)}" -eq 0 || -n "${SSCTL_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
+  if [[ "${EUID:-$(id -u)}" -eq 0 || -n "${SINGTUN_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
     bash "${REPO_ROOT}/scripts/50-gen-clients.sh" --finalize-releases
   fi
 }
@@ -796,7 +855,7 @@ print_subscription_info() {
 
   load_env
   if ! has_subscription "${sub}"; then
-    die "订阅 '${sub}' 不存在（可执行 './ssctl list' 查看当前列表）。"
+    die "订阅 '${sub}' 不存在（可执行 './singtun list' 查看当前列表）。"
   fi
 
   local uuid tok base_url v2ray_url sb_url mihomo_url sr_url vless_uri hy2_uri=""
@@ -842,7 +901,7 @@ print_subscription_info() {
     printf '  - Hysteria2 (QUIC 备用):\n    %s\n' "${hy2_uri}"
   fi
   printf '\n[安全提醒] 订阅链接包含完整节点凭据，切勿截图、公开粘贴或转发他人！\n'
-  printf '           一旦怀疑链接泄露，请立即执行: sudo ./ssctl reset %s\n' "${sub}"
+  printf '           一旦怀疑链接泄露，请立即执行: sudo ./singtun reset %s\n' "${sub}"
   printf '           如需终端扫码，可追加参数: --qr v2ray | singbox | mihomo | sr | vless | hy2\n'
   printf '========================================================================\n'
 
@@ -919,7 +978,7 @@ parse_sub_name_and_qr() {
 
 cmd_add() {
   require_sub_write_privilege
-  acquire_ssctl_lock
+  acquire_singtun_lock
   load_env
 
   parse_sub_name_and_qr "$@"
@@ -937,7 +996,7 @@ cmd_add() {
     die "订阅名 '${name}' 格式非法（仅允许小写字母、数字与非首尾短横线，长度 1-32）。"
   fi
   if has_subscription "${name}"; then
-    die "订阅 '${name}' 已存在！如需查看链接请执行 './ssctl show ${name}'，如需重置凭据请执行 'sudo ./ssctl reset ${name}'。"
+    die "订阅 '${name}' 已存在！如需查看链接请执行 './singtun show ${name}'，如需重置凭据请执行 'sudo ./singtun reset ${name}'。"
   fi
 
   local u_var t_var
@@ -981,25 +1040,25 @@ cmd_list() {
   done < <(list_subscriptions)
 
   if (( count == 0 )); then
-    printf '  (空 — 可通过 "sudo ./ssctl add [name]" 按需创建新订阅)\n'
+    printf '  (空 — 可通过 "sudo ./singtun add [name]" 按需创建新订阅)\n'
   fi
 }
 
 cmd_show() {
   parse_sub_name_and_qr "$@"
-  [[ -n "${SUB_PARSED_NAME}" ]] || die "用法: ./ssctl show <name> [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]"
+  [[ -n "${SUB_PARSED_NAME}" ]] || die "用法: ./singtun show <name> [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]"
   print_subscription_info "${SUB_PARSED_NAME}" "${SUB_PARSED_QR}"
 }
 
 cmd_reset() {
   require_sub_write_privilege
-  acquire_ssctl_lock
+  acquire_singtun_lock
   load_env
 
   parse_sub_name_and_qr "$@"
   local name="${SUB_PARSED_NAME}"
   local qr_type="${SUB_PARSED_QR}"
-  [[ -n "${name}" ]] || die "用法: sudo ./ssctl reset <name> [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]"
+  [[ -n "${name}" ]] || die "用法: sudo ./singtun reset <name> [--qr <v2ray|singbox|mihomo|sr|vless|hy2>]"
 
   if ! has_subscription "${name}"; then
     die "订阅 '${name}' 不存在，无法重置。"
@@ -1030,13 +1089,13 @@ cmd_reset() {
 
 cmd_del() {
   require_sub_write_privilege
-  acquire_ssctl_lock
+  acquire_singtun_lock
   load_env
 
   local name="${1:-}"
-  [[ -n "${name}" && "${name}" != -* ]] || die "用法: sudo ./ssctl del <name>"
+  [[ -n "${name}" && "${name}" != -* ]] || die "用法: sudo ./singtun del <name>"
   if (( $# > 1 )); then
-    die "多余的参数: $2（用法: sudo ./ssctl del <name>）"
+    die "多余的参数: $2（用法: sudo ./singtun del <name>）"
   fi
 
   if ! has_subscription "${name}"; then
@@ -1092,7 +1151,7 @@ cmd_check() {
   make_temp_dir tmp_priv_dir
 
   prepare_check_cert_dir "${tmp_srv_dir}/cert"
-  SSCTL_CERT_DIR_OVERRIDE="${tmp_srv_dir}/cert" SSCTL_WEB_ROOT_OVERRIDE="${tmp_srv_dir}/www" \
+  SINGTUN_CERT_DIR_OVERRIDE="${tmp_srv_dir}/cert" SINGTUN_WEB_ROOT_OVERRIDE="${tmp_srv_dir}/www" \
     bash "${REPO_ROOT}/scripts/40-deploy-server.sh" --render-only "${tmp_srv_dir}"
 
   local f
@@ -1100,9 +1159,9 @@ cmd_check() {
     jq empty "${f}"
   done
 
-  local sb_bin="${SSCTL_SINGBOX_BIN:-}"
+  local sb_bin="${SINGTUN_SINGBOX_BIN:-}"
   if [[ -n "${sb_bin}" ]]; then
-    [[ -x "${sb_bin}" ]] || die "指定的 SSCTL_SINGBOX_BIN 不可执行: ${sb_bin}"
+    [[ -x "${sb_bin}" ]] || die "指定的 SINGTUN_SINGBOX_BIN 不可执行: ${sb_bin}"
   elif command -v sing-box >/dev/null 2>&1; then
     sb_bin="$(command -v sing-box)"
   fi
@@ -1132,13 +1191,13 @@ cmd_check() {
     local probe_uuid probe_tok
     probe_uuid="$(generate_uuid)"
     probe_tok="$(generate_sub_token)"
-    SSCTL_ENV_FILE="${tmp_priv_dir}/.env" env_file_apply_batch "${tmp_priv_dir}/.env" \
+    SINGTUN_ENV_FILE="${tmp_priv_dir}/.env" env_file_apply_batch "${tmp_priv_dir}/.env" \
       'SET:SUBSCRIPTIONS="check-probe"' \
       "SET:UUID_CHECK_PROBE=${probe_uuid}" \
       "SET:SUB_TOKEN_CHECK_PROBE=${probe_tok}"
   fi
 
-  SSCTL_PRIVATE_DIR="${tmp_priv_dir}" SSCTL_ENV_FILE="${tmp_priv_dir}/.env" SSCTL_SINGBOX_BIN="${sb_bin}" \
+  SINGTUN_PRIVATE_DIR="${tmp_priv_dir}" SINGTUN_ENV_FILE="${tmp_priv_dir}/.env" SINGTUN_SINGBOX_BIN="${sb_bin}" \
     bash "${REPO_ROOT}/scripts/50-gen-clients.sh" --local-only
 
   for f in "${tmp_priv_dir}"/out/*/sing-box.json; do
@@ -1158,11 +1217,11 @@ cmd_check() {
   done
 
   rm -rf "${tmp_srv_dir}" "${tmp_priv_dir}"
-  log_info "ssctl check 全部校验通过！"
+  log_info "singtun check 全部校验通过！"
 }
 
 check_cert_status() {
-  local cert_file="/etc/ssctl/cert/fullchain.pem"
+  local cert_file="/etc/singtun/cert/fullchain.pem"
   local end_raw=""
 
   if [[ -r "${cert_file}" ]] && command -v openssl >/dev/null 2>&1; then
@@ -1176,7 +1235,7 @@ check_cert_status() {
   fi
 
   if [[ -z "${end_raw}" ]]; then
-    log_warn "未能读取 TLS 证书到期时间（建议使用 'sudo ./ssctl status' 检查 ${cert_file}）。"
+    log_warn "未能读取 TLS 证书到期时间（建议使用 'sudo ./singtun status' 检查 ${cert_file}）。"
     return 0
   fi
 
@@ -1192,10 +1251,10 @@ check_cert_status() {
 
   local days_left=$(( (exp_epoch - now_epoch) / 86400 ))
   if (( days_left < 0 )); then
-    log_error "TLS 证书已过期 $(( -days_left )) 天 (到期时间: ${end_date})！回落站点将暴露异常特征，请立即检查 CF_API_TOKEN 并运行 'sudo ./ssctl renew'！"
+    log_error "TLS 证书已过期 $(( -days_left )) 天 (到期时间: ${end_date})！回落站点将暴露异常特征，请立即检查 CF_API_TOKEN 并运行 'sudo ./singtun renew'！"
     return 1
   elif (( days_left < 20 )); then
-    log_warn "TLS 证书剩余有效期不足 20 天：仅剩 ${days_left} 天 (${end_date})！自动续期可能已失败，请检查 CF_API_TOKEN 并运行 'sudo ./ssctl renew'。"
+    log_warn "TLS 证书剩余有效期不足 20 天：仅剩 ${days_left} 天 (${end_date})！自动续期可能已失败，请检查 CF_API_TOKEN 并运行 'sudo ./singtun renew'。"
   else
     log_info "TLS 证书状态正常：剩余 ${days_left} 天到期 (${end_date})。"
   fi
@@ -1204,15 +1263,15 @@ check_cert_status() {
 cmd_status() {
   assert_no_args "status" "$@"
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    log_warn "当前未以 root 权限运行，可能无法查看完整服务日志与磁盘证书；建议使用: sudo ./ssctl status"
+    log_warn "当前未以 root 权限运行，可能无法查看完整服务日志与磁盘证书；建议使用: sudo ./singtun status"
   fi
   local svc_rc=0 cert_rc=0
   local -a units=("sing-box" "nginx")
-  if [[ -f "/etc/systemd/system/ssctl-vless-guard.service" ]] || systemctl is-active --quiet ssctl-vless-guard.service 2>/dev/null; then
-    units+=("ssctl-vless-guard")
+  if [[ -f "/etc/systemd/system/singtun-vless-guard.service" ]] || systemctl is-active --quiet singtun-vless-guard.service 2>/dev/null; then
+    units+=("singtun-vless-guard")
   fi
-  if [[ -f "/etc/systemd/system/ssctl-hy2-hop.service" ]] || systemctl is-active --quiet ssctl-hy2-hop.service 2>/dev/null; then
-    units+=("ssctl-hy2-hop")
+  if [[ -f "/etc/systemd/system/singtun-hy2-hop.service" ]] || systemctl is-active --quiet singtun-hy2-hop.service 2>/dev/null; then
+    units+=("singtun-hy2-hop")
   fi
   systemctl status "${units[@]}" --no-pager || svc_rc=$?
   echo ""
@@ -1226,7 +1285,7 @@ cmd_status() {
 cmd_logs() {
   assert_no_args "logs" "$@"
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    log_warn "当前未以 root 权限运行，普通用户通常无法读取 systemd 服务日志；若输出为空请使用: sudo ./ssctl logs"
+    log_warn "当前未以 root 权限运行，普通用户通常无法读取 systemd 服务日志；若输出为空请使用: sudo ./singtun logs"
   fi
   journalctl -u sing-box -u nginx -f
 }
@@ -1234,17 +1293,17 @@ cmd_logs() {
 cmd_restart() {
   assert_no_args "restart" "$@"
   require_root
-  acquire_ssctl_lock
+  acquire_singtun_lock
   systemctl restart nginx sing-box
   sleep 1
   if ! systemctl is-active --quiet nginx || ! systemctl is-active --quiet sing-box; then
-    die "重启后 Nginx 或 sing-box 未处于 active 状态，请运行 'sudo ./ssctl status' 与 'sudo ./ssctl logs' 排查！"
+    die "重启后 Nginx 或 sing-box 未处于 active 状态，请运行 'sudo ./singtun status' 与 'sudo ./singtun logs' 排查！"
   fi
-  if [[ -f "/etc/systemd/system/ssctl-vless-guard.service" ]] && systemctl is-enabled --quiet ssctl-vless-guard.service 2>/dev/null; then
-    systemctl restart ssctl-vless-guard.service
+  if [[ -f "/etc/systemd/system/singtun-vless-guard.service" ]] && systemctl is-enabled --quiet singtun-vless-guard.service 2>/dev/null; then
+    systemctl restart singtun-vless-guard.service
   fi
-  if [[ -f "/etc/systemd/system/ssctl-hy2-hop.service" ]] && systemctl is-enabled --quiet ssctl-hy2-hop.service 2>/dev/null; then
-    systemctl restart ssctl-hy2-hop.service
+  if [[ -f "/etc/systemd/system/singtun-hy2-hop.service" ]] && systemctl is-enabled --quiet singtun-hy2-hop.service 2>/dev/null; then
+    systemctl restart singtun-hy2-hop.service
   fi
   log_info "Nginx 与 sing-box 已重启并通过活跃状态校验。"
 }
@@ -1252,15 +1311,15 @@ cmd_restart() {
 cmd_renew() {
   assert_no_args "renew" "$@"
   require_root
-  acquire_ssctl_lock
+  acquire_singtun_lock
   bash "${REPO_ROOT}/scripts/30-cert.sh" --force
 }
 
 cmd_upgrade() {
   local raw_ver="${1:-}"
-  [[ -n "${raw_ver}" ]] || die "用法: sudo ./ssctl upgrade <version>"
+  [[ -n "${raw_ver}" ]] || die "用法: sudo ./singtun upgrade <version>"
   if (( $# > 1 )); then
-    die "多余的参数: $2（用法: sudo ./ssctl upgrade <version>）"
+    die "多余的参数: $2（用法: sudo ./singtun upgrade <version>）"
   fi
 
   local target_ver="${raw_ver#v}"
@@ -1268,10 +1327,10 @@ cmd_upgrade() {
     die "目标版本格式非法（须形如 x.y.z 或 vx.y.z）: ${raw_ver}"
   fi
 
-  if [[ "${SSCTL_ALLOW_NONROOT_UPGRADE_TEST:-false}" != "true" ]]; then
+  if [[ "${SINGTUN_ALLOW_NONROOT_UPGRADE_TEST:-false}" != "true" ]]; then
     require_root
   fi
-  acquire_ssctl_lock
+  acquire_singtun_lock
   load_env
 
   local old_env_ver="${SINGBOX_VERSION:-}"
@@ -1306,19 +1365,19 @@ cmd_upgrade() {
   if [[ "${upgrade_ok}" == "true" ]]; then
     env_file_set_var "SINGBOX_VERSION" "${target_ver}" "${ENV_FILE}"
     load_env
-    if ! SSCTL_SINGBOX_BIN="${stage_dir}/rootfs/usr/bin/sing-box" bash "${REPO_ROOT}/ssctl" check; then
+    if ! SINGTUN_SINGBOX_BIN="${stage_dir}/rootfs/usr/bin/sing-box" bash "${REPO_ROOT}/singtun" check; then
       upgrade_ok="false"
     fi
   fi
 
   # 3. 校验全部通过后，安装暂存二进制并原子更新服务端与公网订阅
   if [[ "${upgrade_ok}" == "true" ]]; then
-    if [[ "${SSCTL_ALLOW_NONROOT_UPGRADE_TEST:-false}" == "true" ]]; then
-      if ! ( SSCTL_SINGBOX_BIN="${stage_dir}/rootfs/usr/bin/sing-box" SSCTL_DEFER_RELEASE_PRUNE=true bash "${REPO_ROOT}/scripts/50-gen-clients.sh" ); then
+    if [[ "${SINGTUN_ALLOW_NONROOT_UPGRADE_TEST:-false}" == "true" ]]; then
+      if ! ( SINGTUN_SINGBOX_BIN="${stage_dir}/rootfs/usr/bin/sing-box" SINGTUN_DEFER_RELEASE_PRUNE=true bash "${REPO_ROOT}/scripts/50-gen-clients.sh" ); then
         upgrade_ok="false"
       fi
     elif is_server_deployed; then
-      if ! ( SSCTL_DEFER_RELEASE_PRUNE=true bash "${REPO_ROOT}/scripts/40-deploy-server.sh" --upgrade-singbox "${stage_dir}/sing-box.deb" ); then
+      if ! ( SINGTUN_DEFER_RELEASE_PRUNE=true bash "${REPO_ROOT}/scripts/40-deploy-server.sh" --upgrade-singbox "${stage_dir}/sing-box.deb" ); then
         upgrade_ok="false"
       fi
     else
@@ -1384,15 +1443,15 @@ cmd_upgrade() {
     die "sing-box 升级至 ${target_ver} 失败，已完整回滚至升级前状态 (${old_env_ver:-?})。"
   fi
 
-  if [[ "${EUID:-$(id -u)}" -eq 0 || -n "${SSCTL_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
+  if [[ "${EUID:-$(id -u)}" -eq 0 || -n "${SINGTUN_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
     bash "${REPO_ROOT}/scripts/50-gen-clients.sh" --finalize-releases
   fi
   log_info "sing-box 已成功升级/同步至版本 ${target_ver}！"
 }
 
-collect_ssctl_ufw_rules_to_delete() {
+collect_singtun_ufw_rules_to_delete() {
   awk '
-    /# ssctl-(vless-reality|hy2|hy2-hop)([[:space:]]|$)/ && $1 ~ /^[0-9]+(:[0-9]+)?\/(tcp|udp)$/ {
+    /# singtun-(vless-reality|hy2|hy2-hop)([[:space:]]|$)/ && $1 ~ /^[0-9]+(:[0-9]+)?\/(tcp|udp)$/ {
       print $1
     }
   ' | sort -u
@@ -1407,33 +1466,33 @@ cmd_uninstall() {
         shift
         ;;
       *)
-        die "未知选项: $1（用法: sudo ./ssctl uninstall [--purge-cert]）"
+        die "未知选项: $1（用法: sudo ./singtun uninstall [--purge-cert]）"
         ;;
     esac
   done
 
   require_root
-  acquire_ssctl_lock
+  acquire_singtun_lock
   if [[ -f "${ENV_FILE}" ]]; then
     load_env
   fi
 
-  log_info "开始卸载 ssctl 服务端组件（保留 ${PRIVATE_DIR}/ 目录）..."
+  log_info "开始卸载 singtun 服务端组件（保留 ${PRIVATE_DIR}/ 目录）..."
 
   # 1. 停止并禁用 systemd 服务，移除覆盖配置与版本锁定
   local override_dir="/etc/systemd/system/sing-box.service.d"
   local ng_override_dir="/etc/systemd/system/nginx.service.d"
-  local guard_unit="/etc/systemd/system/ssctl-vless-guard.service"
-  local guard_nft="/etc/ssctl/vless-guard.nft"
-  local hy2_unit="/etc/systemd/system/ssctl-hy2-hop.service"
-  local hy2_nft="/etc/ssctl/hy2-hop.nft"
+  local guard_unit="/etc/systemd/system/singtun-vless-guard.service"
+  local guard_nft="/etc/singtun/vless-guard.nft"
+  local hy2_unit="/etc/systemd/system/singtun-hy2-hop.service"
+  local hy2_nft="/etc/singtun/hy2-hop.nft"
 
   if command -v systemctl >/dev/null 2>&1; then
     systemctl disable --now sing-box >/dev/null 2>&1 || true
-    systemctl disable --now ssctl-vless-guard.service >/dev/null 2>&1 || true
-    systemctl disable --now ssctl-hy2-hop.service >/dev/null 2>&1 || true
+    systemctl disable --now singtun-vless-guard.service >/dev/null 2>&1 || true
+    systemctl disable --now singtun-hy2-hop.service >/dev/null 2>&1 || true
   fi
-  rm -f "${override_dir}/override.conf" "${ng_override_dir}/ssctl.conf" "${guard_unit}" "${guard_nft}" "${hy2_unit}" "${hy2_nft}"
+  rm -f "${override_dir}/override.conf" "${ng_override_dir}/singtun.conf" "${guard_unit}" "${guard_nft}" "${hy2_unit}" "${hy2_nft}"
   rmdir "${override_dir}" "${ng_override_dir}" 2>/dev/null || true
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true
@@ -1444,20 +1503,20 @@ cmd_uninstall() {
 
   # 2. 移除服务端 sing-box 配置、Nginx 回落站点/调优项与公网静态订阅目录
   local singbox_etc="/etc/sing-box"
-  local nginx_avail="/etc/nginx/sites-available/ssctl-reality.conf"
-  local nginx_en="/etc/nginx/sites-enabled/ssctl-reality.conf"
-  local nginx_tuning="/etc/nginx/modules-enabled/99-ssctl-tuning.conf"
+  local nginx_avail="/etc/nginx/sites-available/singtun-reality.conf"
+  local nginx_en="/etc/nginx/sites-enabled/singtun-reality.conf"
+  local nginx_tuning="/etc/nginx/modules-enabled/99-singtun-tuning.conf"
   local nginx_main="/etc/nginx/nginx.conf"
-  local web_root="/var/www/ssctl-site"
-  local sub_web_base="/var/lib/ssctl"
+  local web_root="/var/www/singtun-site"
+  local sub_web_base="/var/lib/singtun"
 
   rm -f "${singbox_etc}"/*.json 2>/dev/null || true
   rmdir "${singbox_etc}" 2>/dev/null || true
   rm -f "${nginx_en}" "${nginx_avail}" "${nginx_tuning}"
-  if [[ -f "${nginx_main}" ]] && grep -Fq '# ssctl-tuned-from-768' "${nginx_main}"; then
-    sed -i -E 's/^([[:space:]]*)worker_connections[[:space:]]+[0-9]+;[[:space:]]*#[[:space:]]*ssctl-tuned-from-768$/\1worker_connections 768;/' "${nginx_main}"
+  if [[ -f "${nginx_main}" ]] && grep -Fq '# singtun-tuned-from-768' "${nginx_main}"; then
+    sed -i -E 's/^([[:space:]]*)worker_connections[[:space:]]+[0-9]+;[[:space:]]*#[[:space:]]*singtun-tuned-from-768$/\1worker_connections 768;/' "${nginx_main}"
   fi
-  rm -rf "${web_root}" "${web_root}.ssctl-new" "${web_root}.ssctl-old" "${sub_web_base}"
+  rm -rf "${web_root}" "${web_root}.singtun-new" "${web_root}.singtun-old" "${sub_web_base}"
 
   if command -v nginx >/dev/null 2>&1; then
     if systemctl is-active --quiet nginx 2>/dev/null && nginx -t >/dev/null 2>&1; then
@@ -1465,15 +1524,15 @@ cmd_uninstall() {
     fi
   fi
 
-  # 3. 清理 nftables 保护/端口跳跃表与 UFW 代理放行规则（严格保留 ssctl-preserve-ssh）
+  # 3. 清理 nftables 保护/端口跳跃表与 UFW 代理放行规则（严格保留 singtun-preserve-ssh）
   if command -v nft >/dev/null 2>&1; then
-    if nft list table inet ssctl_guard >/dev/null 2>&1; then
-      nft delete table inet ssctl_guard >/dev/null 2>&1 || true
-      log_info "已移除 nftables 连接保护表 (inet ssctl_guard)。"
+    if nft list table inet singtun_guard >/dev/null 2>&1; then
+      nft delete table inet singtun_guard >/dev/null 2>&1 || true
+      log_info "已移除 nftables 连接保护表 (inet singtun_guard)。"
     fi
-    if nft list table inet ssctl_hy2 >/dev/null 2>&1; then
-      nft delete table inet ssctl_hy2 >/dev/null 2>&1 || true
-      log_info "已移除 nftables 端口跳跃表 (inet ssctl_hy2)。"
+    if nft list table inet singtun_hy2 >/dev/null 2>&1; then
+      nft delete table inet singtun_hy2 >/dev/null 2>&1 || true
+      log_info "已移除 nftables 端口跳跃表 (inet singtun_hy2)。"
     fi
   fi
 
@@ -1492,40 +1551,540 @@ cmd_uninstall() {
       fi
       ufw delete allow "${rule_spec}" >/dev/null 2>&1 || true
       log_info "已移除 UFW 放行规则: ${rule_spec}"
-    done < <(ufw status 2>/dev/null | collect_ssctl_ufw_rules_to_delete || true)
+    done < <(ufw status 2>/dev/null | collect_singtun_ufw_rules_to_delete || true)
   fi
 
   # 4. 清理内核调优配置、journald 限额、遗留文件与证书重载钩子（默认保留证书，支持 --purge-cert 彻底删除）
   rm -f \
-    "/etc/ssctl/ssh_port" \
-    "/etc/sysctl.d/99-ssctl.conf" \
-    "/etc/security/limits.d/99-ssctl.conf" \
-    "/etc/modules-load.d/ssctl-bbr.conf" \
-    "/etc/systemd/journald.conf.d/99-ssctl.conf" \
-    "/usr/local/libexec/ssctl-cert-reload"
+    "/etc/singtun/ssh_port" \
+    "/etc/sysctl.d/99-singtun.conf" \
+    "/etc/security/limits.d/99-singtun.conf" \
+    "/etc/modules-load.d/singtun-bbr.conf" \
+    "/etc/systemd/journald.conf.d/99-singtun.conf" \
+    "/usr/local/libexec/singtun-cert-reload"
   rmdir "/etc/systemd/journald.conf.d" 2>/dev/null || true
 
   if command -v sysctl >/dev/null 2>&1; then
     sysctl --system >/dev/null 2>&1 || true
   fi
 
-  local cert_dir="/etc/ssctl/cert"
+  local cert_dir="/etc/singtun/cert"
   if [[ "${purge_cert}" == "true" ]]; then
     if [[ -n "${SERVER_DOMAIN:-}" && -x "/root/.acme.sh/acme.sh" ]]; then
       env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND HOME="/root" \
         /root/.acme.sh/acme.sh --home "/root/.acme.sh" --remove -d "${SERVER_DOMAIN}" --ecc >/dev/null 2>&1 || true
     fi
     rm -rf "${cert_dir}"
-    rmdir "/etc/ssctl" 2>/dev/null || true
+    rmdir "/etc/singtun" 2>/dev/null || true
     log_info "已按 --purge-cert 清理 TLS 证书目录 (${cert_dir})。"
   else
-    rmdir "/etc/ssctl" 2>/dev/null || true
+    rmdir "/etc/singtun" 2>/dev/null || true
     if [[ -d "${cert_dir}" ]]; then
       log_info "已保留 TLS 证书 (${cert_dir}) 以免重新部署触发 Let's Encrypt 速率限制；如需彻底删除可加 '--purge-cert'。"
     fi
   fi
 
   log_info "卸载完成！私有配置与客户端备份已完整保留于: ${PRIVATE_DIR}/"
+}
+
+_setup_is_doc_ipv4() {
+  case "$1" in
+    192.0.2.*|198.51.100.*|203.0.113.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_setup_trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "${s}"
+}
+
+_setup_read_line() {
+  local input_fd="$1"
+  local prompt="$2"
+  local secret="${3:-false}"
+  local out_var="$4"
+  local -a read_flags=(-u "${input_fd}")
+
+  printf '%s' "${prompt}" >&2
+  if [[ "${secret}" == "true" && -t "${input_fd}" ]]; then
+    read_flags+=(-s)
+  fi
+
+  local val=""
+  if ! IFS= read -r "${read_flags[@]}" val; then
+    if [[ "${secret}" == "true" && -t "${input_fd}" ]]; then
+      printf '\n' >&2
+    fi
+    return 1
+  fi
+  if [[ "${secret}" == "true" && -t "${input_fd}" ]]; then
+    printf '\n' >&2
+  fi
+  printf -v "${out_var}" '%s' "${val}"
+  return 0
+}
+
+_setup_prompt_validated() {
+  local input_fd="$1"
+  local label="$2"
+  local default_val="$3"
+  local validator_fn="$4"
+  local err_msg="$5"
+  local out_var="$6"
+  local lower="${7:-false}"
+  local prompt_str raw
+
+  if [[ -n "${default_val}" ]]; then
+    prompt_str="${label} [${default_val}]: "
+  else
+    prompt_str="${label}: "
+  fi
+
+  while true; do
+    _setup_read_line "${input_fd}" "${prompt_str}" "false" raw \
+      || die "交互输入已结束，已中止 setup。"
+    raw="$(_setup_trim "${raw}")"
+    if [[ -z "${raw}" ]]; then
+      raw="${default_val}"
+    fi
+    if [[ "${lower}" == "true" ]]; then
+      raw="$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]')"
+    fi
+    if "${validator_fn}" "${raw}"; then
+      printf -v "${out_var}" '%s' "${raw}"
+      return 0
+    fi
+    log_warn "${err_msg}"
+  done
+}
+
+_setup_prompt_yn() {
+  local input_fd="$1"
+  local prompt="$2"
+  local default_yn="$3"
+  local ans
+  while true; do
+    _setup_read_line "${input_fd}" "${prompt}" "false" ans \
+      || die "交互输入已结束，已中止 setup。"
+    ans="$(_setup_trim "${ans}" | tr '[:upper:]' '[:lower:]')"
+    [[ -z "${ans}" ]] && ans="${default_yn}"
+    case "${ans}" in
+      y|yes) return 0 ;;
+      n|no)  return 1 ;;
+      *) log_warn "请输入 y 或 n。" ;;
+    esac
+  done
+}
+
+_setup_valid_domain_input() {
+  local d="$1"
+  is_valid_domain "${d}" && ! is_reserved_example_domain "${d}"
+}
+
+_setup_valid_public_ip_input() {
+  local ip="$1"
+  is_valid_ipv4 "${ip}" || return 1
+  ! is_non_public_ipv4 "${ip}" || return 1
+  if [[ "${SINGTUN_SETUP_ALLOW_DOC_IP:-false}" != "true" ]] && _setup_is_doc_ipv4 "${ip}"; then
+    return 1
+  fi
+  return 0
+}
+
+_setup_valid_email_input() {
+  local email="$1"
+  is_valid_email "${email}" && ! is_reserved_example_email "${email}"
+}
+
+_setup_valid_port_range_opt() {
+  local r="$1"
+  [[ -z "${r}" ]] || is_valid_port_range "${r}"
+}
+
+_setup_valid_pos_int_opt() {
+  local n="$1"
+  [[ -z "${n}" || "${n}" =~ ^[1-9][0-9]*$ ]]
+}
+
+_setup_valid_sb_ver() {
+  local v="$1"
+  [[ "${v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]
+}
+
+_setup_resolve_a_records() {
+  local domain="$1"
+  local out=""
+  if command -v dig >/dev/null 2>&1; then
+    out="$(dig +short +time=4 +tries=1 A "${domain}" @1.1.1.1 2>/dev/null || dig +short +time=4 +tries=1 A "${domain}" 2>/dev/null || true)"
+  fi
+  if [[ -z "${out}" ]] && command -v getent >/dev/null 2>&1; then
+    out="$(getent ahostsv4 "${domain}" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+  fi
+  if [[ -z "${out}" ]] && command -v curl >/dev/null 2>&1; then
+    out="$(curl -fsS --max-time 4 -H 'accept: application/dns-json' "https://1.1.1.1/dns-query?name=${domain}&type=A" 2>/dev/null \
+      | grep -oE '"data":"([0-9]{1,3}\.){3}[0-9]{1,3}"' \
+      | cut -d'"' -f4 || true)"
+  fi
+  printf '%s\n' "${out}" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | sort -u || true
+}
+
+_setup_bootstrap_deps() {
+  local -a missing_pkgs=()
+  command -v curl >/dev/null 2>&1 || missing_pkgs+=(curl)
+  command -v openssl >/dev/null 2>&1 || missing_pkgs+=(openssl)
+  [[ -d /etc/ssl/certs ]] || missing_pkgs+=(ca-certificates)
+  if (( ${#missing_pkgs[@]} > 0 )); then
+    log_info "正在安装交互向导所需的最小依赖: ${missing_pkgs[*]}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq --no-install-recommends "${missing_pkgs[@]}"
+  fi
+}
+
+_setup_prompt_hy2_opts() {
+  local input_fd="$1"
+  local -n _hy2_port_ref="$2"
+  local -n _hy2_obfs_ref="$3"
+  local -n _hy2_hop_ref="$4"
+  local -n _hy2_up_ref="$5"
+  local -n _hy2_down_ref="$6"
+
+  _setup_prompt_validated "${input_fd}" "Hysteria2 UDP 端口 (HY2_PORT)" "${_hy2_port_ref:-${DEFAULT_HY2_PORT}}" \
+    is_valid_port "端口必须为 1-65535 整数。" _hy2_port_ref
+  _setup_prompt_validated "${input_fd}" "启用 salamander 混淆 (HY2_OBFS: true/false)" "${_hy2_obfs_ref:-${DEFAULT_HY2_OBFS}}" \
+    is_valid_bool "请输入 true 或 false。" _hy2_obfs_ref "true"
+  _setup_prompt_validated "${input_fd}" "端口跳跃范围 (HY2_HOP_PORTS，如 20000-30000，留空跳过)" "${_hy2_hop_ref:-}" \
+    _setup_valid_port_range_opt "端口跳跃范围格式无效（示例: 20000-30000，或留空关闭）。" _hy2_hop_ref
+  _setup_prompt_validated "${input_fd}" "可选上行带宽 Mbps (HY2_UP_MBPS，留空使用 BBR)" "${_hy2_up_ref:-}" \
+    _setup_valid_pos_int_opt "带宽必须为正整数或留空。" _hy2_up_ref
+  _setup_prompt_validated "${input_fd}" "可选下行带宽 Mbps (HY2_DOWN_MBPS，留空使用 BBR)" "${_hy2_down_ref:-}" \
+    _setup_valid_pos_int_opt "带宽必须为正整数或留空。" _hy2_down_ref
+}
+
+cmd_setup() {
+  local config_only="false"
+  while (( $# > 0 )); do
+    case "$1" in
+      --config-only)
+        config_only="true"
+        shift
+        ;;
+      *)
+        die "未知选项: $1（用法: sudo ./singtun setup [--config-only]）"
+        ;;
+    esac
+  done
+
+  [[ "${SINGTUN_SETUP_CONFIG_ONLY:-false}" == "true" ]] && config_only="true"
+  local skip_deploy="${config_only}"
+  [[ "${SINGTUN_SETUP_SKIP_DEPLOY:-false}" == "true" ]] && skip_deploy="true"
+
+  if [[ "${skip_deploy}" != "true" ]]; then
+    require_root
+    if [[ "${SKIP_OS_CHECK:-false}" != "true" && -r /etc/os-release ]]; then
+      local os_id=""
+      os_id="$(awk -F= '/^ID=/{gsub(/"/, "", $2); print tolower($2)}' /etc/os-release 2>/dev/null || true)"
+      case "${os_id}" in
+        ubuntu|debian) ;;
+        *) die "当前系统 (${os_id:-unknown}) 暂不支持自动部署，请使用 Debian 或 Ubuntu 22.04+。" ;;
+      esac
+    fi
+    _setup_bootstrap_deps
+  fi
+
+  local input_fd=0
+  _SINGTUN_SETUP_OPENED_TTY="false"
+  if [[ "${SINGTUN_SETUP_USE_STDIN:-false}" != "true" && ! -t 0 ]]; then
+    if [[ -r /dev/tty ]]; then
+      exec 3</dev/tty
+      input_fd=3
+      _SINGTUN_SETUP_OPENED_TTY="true"
+    else
+      die "当前非交互终端且无法打开 /dev/tty；请使用 './singtun init' 手动编辑 private/.env 后运行 'sudo ./singtun deploy'。"
+    fi
+  fi
+  cleanup_setup_tty() {
+    if [[ "${_SINGTUN_SETUP_OPENED_TTY:-false}" == "true" ]]; then
+      exec 3<&- 2>/dev/null || true
+      _SINGTUN_SETUP_OPENED_TTY="false"
+    fi
+    trap - RETURN
+  }
+  trap cleanup_setup_tty RETURN
+
+  cmd_init
+  load_env
+
+  local def_domain="" def_ip="" existing_token="${CF_API_TOKEN:-}"
+  if is_valid_domain "${SERVER_DOMAIN:-}" && ! is_reserved_example_domain "${SERVER_DOMAIN}"; then
+    def_domain="${SERVER_DOMAIN}"
+  fi
+  if is_valid_ipv4 "${SERVER_IP:-}" && ! is_non_public_ipv4 "${SERVER_IP}" && ! _setup_is_doc_ipv4 "${SERVER_IP}"; then
+    def_ip="${SERVER_IP}"
+  else
+    log_info "正在探测本机公网 IPv4..."
+    def_ip="$(detect_public_ipv4 2>/dev/null || true)"
+  fi
+
+  printf '\n=== singtun 交互式部署向导 ===\n' >&2
+  printf '提示：直接回车将使用方括号中的智能默认值。\n\n' >&2
+
+  local in_domain="" in_ip=""
+  while true; do
+    _setup_prompt_validated "${input_fd}" "1/4 连接域名 (SERVER_DOMAIN，Cloudflare 须设为 DNS only)" "${def_domain}" \
+      _setup_valid_domain_input "域名格式无效或不能使用 example.com 等示例域名，请输入真实子域名（如 node.yourdomain.com）。" in_domain "true"
+    _setup_prompt_validated "${input_fd}" "2/4 服务器公网 IPv4 (SERVER_IP)" "${def_ip}" \
+      _setup_valid_public_ip_input "请输入有效的公网 IPv4 地址。" in_ip
+
+    if [[ "${SINGTUN_SETUP_SKIP_DNS_CHECK:-false}" == "true" ]]; then
+      break
+    fi
+
+    local dns_done="false" edit_again="false"
+    while true; do
+      local resolved_ips=""
+      resolved_ips="$(_setup_resolve_a_records "${in_domain}")"
+      if [[ -n "${resolved_ips}" ]] && grep -Fxq "${in_ip}" <<< "${resolved_ips}"; then
+        log_info "DNS A 记录核验通过: ${in_domain} -> ${in_ip}"
+        dns_done="true"
+        break
+      fi
+      log_warn "DNS 核验未匹配：${in_domain} 当前 A 记录为 [${resolved_ips:-无解析}]，预期公网 IP 为 ${in_ip}。"
+      log_warn "请确认已在 Cloudflare 添加 A 记录，且 Proxy status 为 DNS only（灰色云朵）。"
+      local dns_action=""
+      _setup_read_line "${input_fd}" "请选择: [R]重新检测 / [C]继续使用当前配置 / [E]修改域名或IP / [Q]退出 (默认 R): " "false" dns_action \
+        || die "交互输入已结束，已中止 setup。"
+      dns_action="$(_setup_trim "${dns_action}" | tr '[:upper:]' '[:lower:]')"
+      [[ -z "${dns_action}" ]] && dns_action="r"
+      case "${dns_action}" in
+        r) continue ;;
+        c) log_warn "已按用户选择跳过 DNS 匹配继续（后续 cert/preflight 阶段仍会校验域名）。"; dns_done="true"; break ;;
+        e) def_domain="${in_domain}"; def_ip="${in_ip}"; edit_again="true"; break ;;
+        q) log_info "已退出 setup 向导，未修改配置。"; return 0 ;;
+        *) log_warn "无效选项，请输入 R、C、E 或 Q。" ;;
+      esac
+    done
+    [[ "${edit_again}" == "true" ]] && continue
+    [[ "${dns_done}" == "true" ]] && break
+  done
+
+  local in_token="" tok_prompt=""
+  if [[ -n "${existing_token}" ]]; then
+    tok_prompt="3/4 Cloudflare API Token (仅需 Zone.DNS:Edit，直接回车保留已有 Token): "
+  else
+    tok_prompt="3/4 Cloudflare API Token (仅需 Zone.DNS:Edit，输入默认不回显): "
+  fi
+  while true; do
+    _setup_read_line "${input_fd}" "${tok_prompt}" "true" in_token \
+      || die "交互输入已结束，已中止 setup。"
+    in_token="$(_setup_trim "${in_token}")"
+    if [[ -z "${in_token}" && -n "${existing_token}" ]]; then
+      in_token="${existing_token}"
+    fi
+    if [[ -z "${in_token}" ]]; then
+      log_warn "CF_API_TOKEN 不能为空。"
+      continue
+    fi
+    if [[ "${in_token}" =~ [[:space:]\'\"\`\$\\] ]]; then
+      log_warn "CF_API_TOKEN 不可包含空白符、引号或特殊转义字符。"
+      continue
+    fi
+    break
+  done
+
+  local def_email="" in_email=""
+  if is_valid_email "${ACME_EMAIL:-}" && ! is_reserved_example_email "${ACME_EMAIL}"; then
+    def_email="${ACME_EMAIL}"
+  else
+    def_email="$(derive_default_acme_email "${in_domain}")"
+  fi
+  _setup_prompt_validated "${input_fd}" "4/4 ACME 证书通知邮箱 (ACME_EMAIL)" "${def_email}" \
+    _setup_valid_email_input "邮箱格式无效或为 example.com 等保留示例邮箱，请输入有效邮箱。" in_email "true"
+
+  printf '\n请选择部署方案:\n' >&2
+  printf '  [1] 推荐标准模式 — VLESS + REALITY + Vision，公网订阅开启，IPv4 only（默认）\n' >&2
+  printf '  [2] 标准 + Hysteria2 备用模式 — 额外开启 UDP 8443 Hysteria2（可选端口跳跃与混淆）\n' >&2
+  printf '  [3] 高级自定义模式 — 逐项调整版本、端口、日志级别、IPv6、DNS 与 Hysteria2\n' >&2
+
+  local mode_choice=""
+  while true; do
+    _setup_read_line "${input_fd}" "请输入选项 [1-3] (默认 1): " "false" mode_choice \
+      || die "交互输入已结束，已中止 setup。"
+    mode_choice="$(_setup_trim "${mode_choice}")"
+    [[ -z "${mode_choice}" ]] && mode_choice="1"
+    case "${mode_choice}" in
+      1|2|3) break ;;
+      *) log_warn "请输入 1、2 或 3。" ;;
+    esac
+  done
+
+  local in_sb_ver="${SINGBOX_VERSION}"
+  local in_sb_compat="${SINGBOX_CLIENT_COMPAT}"
+  local in_vless_port="${VLESS_PORT}"
+  local in_hs_port="${REALITY_HANDSHAKE_PORT}"
+  local in_ipv6="false"
+  local in_log_level="${SERVER_LOG_LEVEL}"
+  local in_enable_sub="true"
+  local in_dns_direct="${DNS_DIRECT}"
+  local in_dns_remote="${DNS_REMOTE}"
+  local in_enable_hy2="false"
+  local in_hy2_port="${HY2_PORT}"
+  local in_hy2_obfs="${HY2_OBFS}"
+  local in_hy2_hop="${HY2_HOP_PORTS:-}"
+  local in_hy2_up="${HY2_UP_MBPS:-}"
+  local in_hy2_down="${HY2_DOWN_MBPS:-}"
+
+  if [[ "${mode_choice}" == "2" ]]; then
+    in_enable_hy2="true"
+    _setup_prompt_hy2_opts "${input_fd}" in_hy2_port in_hy2_obfs in_hy2_hop in_hy2_up in_hy2_down
+  elif [[ "${mode_choice}" == "3" ]]; then
+    _setup_prompt_validated "${input_fd}" "sing-box 版本 (SINGBOX_VERSION)" "${in_sb_ver}" \
+      _setup_valid_sb_ver "版本号格式无效（示例: 1.14.4）。" in_sb_ver
+    _setup_prompt_validated "${input_fd}" "客户端语法兼容版本 (SINGBOX_CLIENT_COMPAT: 1.14/1.12)" "${in_sb_compat}" \
+      is_valid_singbox_compat "仅支持 1.14 或 1.12。" in_sb_compat
+    _setup_prompt_validated "${input_fd}" "VLESS 入站端口 (VLESS_PORT)" "${in_vless_port}" \
+      is_valid_port "端口必须为 1-65535 整数。" in_vless_port
+    _setup_prompt_validated "${input_fd}" "本机回落 Nginx 端口 (REALITY_HANDSHAKE_PORT)" "${in_hs_port}" \
+      is_valid_port "端口必须为 1-65535 整数。" in_hs_port
+    _setup_prompt_validated "${input_fd}" "启用服务端 IPv6 (SERVER_IPV6: true/false)" "${SERVER_IPV6}" \
+      is_valid_bool "请输入 true 或 false。" in_ipv6 "true"
+    _setup_prompt_validated "${input_fd}" "服务端日志级别 (SERVER_LOG_LEVEL)" "${in_log_level}" \
+      is_valid_log_level "日志级别必须为 trace|debug|info|warn|error|fatal|panic。" in_log_level "true"
+    _setup_prompt_validated "${input_fd}" "开启公网高熵订阅托管 (ENABLE_SUBSCRIPTION: true/false)" "${ENABLE_SUBSCRIPTION}" \
+      is_valid_bool "请输入 true 或 false。" in_enable_sub "true"
+    _setup_prompt_validated "${input_fd}" "国内直连 IP-DoH (DNS_DIRECT: 223.5.5.5|223.6.6.6)" "${in_dns_direct}" \
+      is_valid_dns_direct_ip "仅支持 223.5.5.5 或 223.6.6.6。" in_dns_direct
+    _setup_prompt_validated "${input_fd}" "海外代理 IP-DoH (DNS_REMOTE: 1.1.1.1|1.0.0.1|8.8.8.8|8.8.4.4|9.9.9.9)" "${in_dns_remote}" \
+      is_valid_dns_remote_ip "仅支持 1.1.1.1 / 1.0.0.1 / 8.8.8.8 / 8.8.4.4 / 9.9.9.9。" in_dns_remote
+    _setup_prompt_validated "${input_fd}" "启用 Hysteria2 备用入站 (ENABLE_HY2: true/false)" "${ENABLE_HY2}" \
+      is_valid_bool "请输入 true 或 false。" in_enable_hy2 "true"
+    if [[ "${in_enable_hy2}" == "true" ]]; then
+      _setup_prompt_hy2_opts "${input_fd}" in_hy2_port in_hy2_obfs in_hy2_hop in_hy2_up in_hy2_down
+    fi
+  fi
+
+  local masked_token=""
+  if (( ${#in_token} >= 8 )); then
+    masked_token="****${in_token: -4}"
+  else
+    masked_token="****(${#in_token}字符)"
+  fi
+
+  printf '\n%s\n' '--- 配置摘要（敏感信息已脱敏） ---' >&2
+  printf '  SERVER_DOMAIN          = %s\n' "${in_domain}" >&2
+  printf '  SERVER_IP              = %s\n' "${in_ip}" >&2
+  printf '  ACME_EMAIL             = %s\n' "${in_email}" >&2
+  printf '  CF_API_TOKEN           = %s\n' "${masked_token}" >&2
+  printf '  SINGBOX_VERSION        = %s (compat: %s)\n' "${in_sb_ver}" "${in_sb_compat}" >&2
+  printf '  VLESS_PORT             = %s (handshake: 127.0.0.1:%s)\n' "${in_vless_port}" "${in_hs_port}" >&2
+  printf '  SERVER_IPV6            = %s\n' "${in_ipv6}" >&2
+  printf '  SERVER_LOG_LEVEL       = %s\n' "${in_log_level}" >&2
+  printf '  ENABLE_SUBSCRIPTION    = %s\n' "${in_enable_sub}" >&2
+  printf '  DNS_DIRECT / REMOTE    = %s / %s\n' "${in_dns_direct}" "${in_dns_remote}" >&2
+  printf '  ENABLE_HY2             = %s\n' "${in_enable_hy2}" >&2
+  if [[ "${in_enable_hy2}" == "true" ]]; then
+    printf '  HY2 (port/obfs/hop)    = %s / %s / %s\n' "${in_hy2_port}" "${in_hy2_obfs}" "${in_hy2_hop:-关闭}" >&2
+  fi
+  printf '%s\n' '--------------------------------------' >&2
+
+  if ! _setup_prompt_yn "${input_fd}" "确认写入 ${ENV_FILE} 并继续? [Y/n]: " "y"; then
+    log_info "已取消，未修改配置。"
+    return 0
+  fi
+
+  env_file_apply_batch "${ENV_FILE}" \
+    "SET:SERVER_DOMAIN=${in_domain}" \
+    "SET:SERVER_IP=${in_ip}" \
+    "SET:ACME_EMAIL=${in_email}" \
+    "SET:CF_API_TOKEN=${in_token}" \
+    "SET:SINGBOX_VERSION=${in_sb_ver}" \
+    "SET:SINGBOX_CLIENT_COMPAT=${in_sb_compat}" \
+    "SET:VLESS_PORT=${in_vless_port}" \
+    "SET:REALITY_HANDSHAKE_PORT=${in_hs_port}" \
+    "SET:SERVER_IPV6=${in_ipv6}" \
+    "SET:SERVER_LOG_LEVEL=${in_log_level}" \
+    "SET:ENABLE_SUBSCRIPTION=${in_enable_sub}" \
+    "SET:DNS_DIRECT=${in_dns_direct}" \
+    "SET:DNS_REMOTE=${in_dns_remote}" \
+    "SET:ENABLE_HY2=${in_enable_hy2}" \
+    "SET:HY2_PORT=${in_hy2_port}" \
+    "SET:HY2_OBFS=${in_hy2_obfs}" \
+    "SET:HY2_HOP_PORTS=${in_hy2_hop}" \
+    "SET:HY2_UP_MBPS=${in_hy2_up}" \
+    "SET:HY2_DOWN_MBPS=${in_hy2_down}"
+  load_env
+  log_info "配置已保存至 ${ENV_FILE}"
+
+  if [[ "${skip_deploy}" == "true" ]]; then
+    log_info "已仅完成配置写入；下一步请执行: sudo singtun deploy"
+    return 0
+  fi
+
+  cmd_deploy
+  load_env
+
+  local -a existing_subs=()
+  mapfile -t existing_subs < <(list_subscriptions || true)
+
+  local create_sub="false"
+  if (( ${#existing_subs[@]} == 0 )); then
+    if _setup_prompt_yn "${input_fd}" "部署成功！是否立即创建首条客户端订阅? [Y/n]: " "y"; then
+      create_sub="true"
+    fi
+  else
+    if _setup_prompt_yn "${input_fd}" "部署成功（已有订阅: ${existing_subs[*]}），是否新建一条订阅? [y/N]: " "n"; then
+      create_sub="true"
+    fi
+  fi
+
+  if [[ "${create_sub}" == "true" ]]; then
+    local sub_name=""
+    while true; do
+      _setup_read_line "${input_fd}" "订阅名称（仅小写字母/数字/短横线，回车自动命名为 sub-1 等）: " "false" sub_name \
+        || die "交互输入已结束。"
+      sub_name="$(_setup_trim "${sub_name}")"
+      if [[ -z "${sub_name}" ]]; then
+        break
+      fi
+      if is_valid_sub_name "${sub_name}" && ! is_reserved_sub_name "${sub_name}"; then
+        local exists="false" s_item
+        for s_item in "${existing_subs[@]}"; do
+          if [[ "${s_item}" == "${sub_name}" ]]; then
+            exists="true"
+            break
+          fi
+        done
+        if [[ "${exists}" == "true" ]]; then
+          log_warn "订阅 [${sub_name}] 已存在，请换一个名称。"
+          continue
+        fi
+        break
+      fi
+      log_warn "订阅名称格式无效（仅允许 1-32 位小写字母、数字和中间连字符，且不能为保留字）。"
+    done
+
+    local qr_choice=""
+    while true; do
+      _setup_read_line "${input_fd}" "终端输出二维码格式 [N(不显示)/v2ray/singbox/mihomo/sr/vless/hy2] (默认 N): " "false" qr_choice \
+        || die "交互输入已结束。"
+      qr_choice="$(_setup_trim "${qr_choice}" | tr '[:upper:]' '[:lower:]')"
+      case "${qr_choice}" in
+        ""|n|no) qr_choice=""; break ;;
+        v2ray|singbox|mihomo|sr|vless|hy2) break ;;
+        *) log_warn "不支持的二维码格式: ${qr_choice}" ;;
+      esac
+    done
+
+    local -a add_args=()
+    [[ -n "${sub_name}" ]] && add_args+=("${sub_name}")
+    [[ -n "${qr_choice}" ]] && add_args+=(--qr "${qr_choice}")
+    cmd_add "${add_args[@]}"
+  fi
+
+  log_info "singtun 部署完成！日常常用命令: sudo singtun status | sudo singtun add | sudo singtun logs"
 }
 
 main() {
@@ -1538,6 +2097,9 @@ main() {
   fi
 
   case "${subcmd}" in
+    setup)
+      cmd_setup "$@"
+      ;;
     init)
       cmd_init "$@"
       ;;

@@ -32,7 +32,7 @@ prune_stale_ufw_rules() {
       log_info "已清理旧 SSH UFW 保留规则: ${old_port_proto}"
     done < <(
       ufw status 2>/dev/null \
-        | awk '/# ssctl-preserve-ssh([[:space:]]|$)/ && $1 ~ /^[0-9]+\/tcp$/ {print $1}' \
+        | awk '/# singtun-preserve-ssh([[:space:]]|$)/ && $1 ~ /^[0-9]+\/tcp$/ {print $1}' \
         | sort -u || true
     )
   fi
@@ -43,7 +43,7 @@ prune_stale_ufw_rules() {
     log_info "已清理旧 VLESS_PORT UFW 放行规则: ${old_port_proto}"
   done < <(
     ufw status 2>/dev/null \
-      | awk -v cur="${VLESS_PORT}/tcp" '/# ssctl-vless-reality([[:space:]]|$)/ && $1 ~ /^[0-9]+\/tcp$/ && $1 != cur {print $1}' \
+      | awk -v cur="${VLESS_PORT}/tcp" '/# singtun-vless-reality([[:space:]]|$)/ && $1 ~ /^[0-9]+\/tcp$/ && $1 != cur {print $1}' \
       | sort -u || true
   )
 
@@ -53,7 +53,7 @@ prune_stale_ufw_rules() {
     log_info "已清理旧 Hysteria2 UFW 放行规则: ${old_port_proto}"
   done < <(
     ufw status 2>/dev/null \
-      | awk -v cur="${cur_hy2_udp}" '/# ssctl-hy2([[:space:]]|$)/ && $1 ~ /^[0-9]+\/udp$/ && $1 != cur {print $1}' \
+      | awk -v cur="${cur_hy2_udp}" '/# singtun-hy2([[:space:]]|$)/ && $1 ~ /^[0-9]+\/udp$/ && $1 != cur {print $1}' \
       | sort -u || true
   )
 
@@ -63,7 +63,7 @@ prune_stale_ufw_rules() {
     log_info "已清理旧 Hysteria2 端口跳跃 UFW 放行规则: ${old_port_proto}"
   done < <(
     ufw status 2>/dev/null \
-      | awk -v cur="${cur_hy2_hop_udp}" '/# ssctl-hy2-hop([[:space:]]|$)/ && $1 ~ /^[0-9]+:[0-9]+\/udp$/ && $1 != cur {print $1}' \
+      | awk -v cur="${cur_hy2_hop_udp}" '/# singtun-hy2-hop([[:space:]]|$)/ && $1 ~ /^[0-9]+:[0-9]+\/udp$/ && $1 != cur {print $1}' \
       | sort -u || true
   )
 }
@@ -79,27 +79,27 @@ configure_ufw() {
     if [[ "${p}" == "${VLESS_PORT}" ]]; then
       die "VLESS_PORT (${VLESS_PORT}) 与当前活跃 SSH 端口冲突，拒绝覆盖 SSH 防火墙保护规则！"
     fi
-    ufw allow "${p}/tcp" comment 'ssctl-preserve-ssh'
+    ufw allow "${p}/tcp" comment 'singtun-preserve-ssh'
   done < <(detect_active_ssh_ports)
 
-  ufw allow "${VLESS_PORT}/tcp" comment 'ssctl-vless-reality'
+  ufw allow "${VLESS_PORT}/tcp" comment 'singtun-vless-reality'
 
   local enable_hy2="${ENABLE_HY2:-false}"
   if [[ "${enable_hy2}" == "true" ]]; then
     require_vars HY2_PORT
-    ufw allow "${HY2_PORT}/udp" comment 'ssctl-hy2'
+    ufw allow "${HY2_PORT}/udp" comment 'singtun-hy2'
 
     if [[ -n "${HY2_HOP_PORTS:-}" ]]; then
       if ! is_valid_port_range "${HY2_HOP_PORTS}"; then
         die "HY2_HOP_PORTS 格式非法: ${HY2_HOP_PORTS}"
       fi
-      ufw allow "${HY2_HOP_PORTS//-/:}/udp" comment 'ssctl-hy2-hop'
+      ufw allow "${HY2_HOP_PORTS//-/:}/udp" comment 'singtun-hy2-hop'
     fi
   fi
 
   ufw --force enable
 
-  if [[ "${SSCTL_DEFER_UFW_PRUNE:-false}" != "true" ]]; then
+  if [[ "${SINGTUN_DEFER_UFW_PRUNE:-false}" != "true" ]]; then
     prune_stale_ufw_rules
   fi
 
@@ -107,8 +107,8 @@ configure_ufw() {
 }
 
 configure_vless_conn_guard() {
-  local nft_file="/etc/ssctl/vless-guard.nft"
-  local unit_file="/etc/systemd/system/ssctl-vless-guard.service"
+  local nft_file="/etc/singtun/vless-guard.nft"
+  local unit_file="/etc/systemd/system/singtun-vless-guard.service"
 
   if ! is_valid_port "${VLESS_PORT}"; then
     die "VLESS_PORT 不是合法端口号: ${VLESS_PORT}"
@@ -120,7 +120,7 @@ configure_vless_conn_guard() {
     apt-get install -y -qq nftables
   fi
 
-  mkdir -p /etc/ssctl
+  mkdir -p /etc/singtun
   local ipv6_sets="" ipv6_rules=""
   if [[ "${SERVER_IPV6:-false}" == "true" ]]; then
     ipv6_sets="    # ct count (nft_connlimit) 自带内核 NFT_EXPR_GC 连接归零自动回收，禁止叠加 timeout（否则内核返回 EOPNOTSUPP）
@@ -143,11 +143,11 @@ configure_vless_conn_guard() {
 
   cat > "${nft_file}" <<EOF
 #!/usr/sbin/nft -f
-# Managed by ssctl (10-harden.sh) — VLESS 入站单源并发与 SYN 洪水保护独立表（严禁使用全局 flush ruleset）
-table inet ssctl_guard
-delete table inet ssctl_guard
+# Managed by singtun (10-harden.sh) — VLESS 入站单源并发与 SYN 洪水保护独立表（严禁使用全局 flush ruleset）
+table inet singtun_guard
+delete table inet singtun_guard
 
-table inet ssctl_guard {
+table inet singtun_guard {
     # ct count (nft_connlimit) 自带内核 NFT_EXPR_GC 连接归零自动回收，禁止叠加 timeout（否则内核返回 EOPNOTSUPP）
     set vless_conn_v4 {
         type ipv4_addr
@@ -173,42 +173,42 @@ EOF
   nft -f "${nft_file}"
 
   cat > "${unit_file}" <<EOF
-# Managed by ssctl (10-harden.sh) — Persist VLESS per-IP connection & SYN guard without flushing UFW
+# Managed by singtun (10-harden.sh) — Persist VLESS per-IP connection & SYN guard without flushing UFW
 [Unit]
-Description=ssctl VLESS Per-IP Connection Guard (nftables table inet ssctl_guard)
+Description=singtun VLESS Per-IP Connection Guard (nftables table inet singtun_guard)
 After=network.target ufw.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f ${nft_file}
-ExecStop=-/usr/sbin/nft delete table inet ssctl_guard
+ExecStop=-/usr/sbin/nft delete table inet singtun_guard
 
 [Install]
 WantedBy=multi-user.target
 EOF
   chmod 644 "${unit_file}"
   systemctl daemon-reload
-  systemctl enable --now ssctl-vless-guard.service
-  log_info "VLESS 入站抗连接耗尽保护已启用: TCP :${VLESS_PORT} 单源并发 <= 256, SYN <= 120/s (table inet ssctl_guard)"
+  systemctl enable --now singtun-vless-guard.service
+  log_info "VLESS 入站抗连接耗尽保护已启用: TCP :${VLESS_PORT} 单源并发 <= 256, SYN <= 120/s (table inet singtun_guard)"
 }
 
 configure_hy2_port_hopping() {
-  local nft_file="/etc/ssctl/hy2-hop.nft"
-  local unit_file="/etc/systemd/system/ssctl-hy2-hop.service"
+  local nft_file="/etc/singtun/hy2-hop.nft"
+  local unit_file="/etc/systemd/system/singtun-hy2-hop.service"
   local enable_hy2="${ENABLE_HY2:-false}"
 
   if [[ "${enable_hy2}" != "true" || -z "${HY2_HOP_PORTS:-}" ]]; then
-    if [[ -f "${unit_file}" ]] || systemctl is-active --quiet ssctl-hy2-hop.service 2>/dev/null; then
-      systemctl disable --now ssctl-hy2-hop.service >/dev/null 2>&1 || true
+    if [[ -f "${unit_file}" ]] || systemctl is-active --quiet singtun-hy2-hop.service 2>/dev/null; then
+      systemctl disable --now singtun-hy2-hop.service >/dev/null 2>&1 || true
       rm -f "${unit_file}"
       systemctl daemon-reload
     fi
     rm -f "${nft_file}"
     if command -v nft >/dev/null 2>&1; then
-      if nft list table inet ssctl_hy2 >/dev/null 2>&1; then
-        nft delete table inet ssctl_hy2 >/dev/null 2>&1 || true
-        log_info "已移除 Hysteria2 端口跳跃 nftables 表 (inet ssctl_hy2)。"
+      if nft list table inet singtun_hy2 >/dev/null 2>&1; then
+        nft delete table inet singtun_hy2 >/dev/null 2>&1 || true
+        log_info "已移除 Hysteria2 端口跳跃 nftables 表 (inet singtun_hy2)。"
       fi
     fi
     return 0
@@ -226,18 +226,18 @@ configure_hy2_port_hopping() {
     apt-get install -y -qq nftables
   fi
 
-  mkdir -p /etc/ssctl
+  mkdir -p /etc/singtun
   local nfproto_match="meta nfproto ipv4 "
   if [[ "${SERVER_IPV6:-false}" == "true" ]]; then
     nfproto_match=""
   fi
   cat > "${nft_file}" <<EOF
 #!/usr/sbin/nft -f
-# Managed by ssctl (10-harden.sh) — Hysteria2 UDP 端口跳跃独立表（严禁使用全局 flush ruleset）
-table inet ssctl_hy2
-delete table inet ssctl_hy2
+# Managed by singtun (10-harden.sh) — Hysteria2 UDP 端口跳跃独立表（严禁使用全局 flush ruleset）
+table inet singtun_hy2
+delete table inet singtun_hy2
 
-table inet ssctl_hy2 {
+table inet singtun_hy2 {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
         ${nfproto_match}fib daddr type local udp dport ${hop_start}-${hop_end} redirect to :${HY2_PORT}
@@ -249,24 +249,24 @@ EOF
   nft -f "${nft_file}"
 
   cat > "${unit_file}" <<EOF
-# Managed by ssctl (10-harden.sh) — Persist Hysteria2 UDP port hopping without flushing UFW
+# Managed by singtun (10-harden.sh) — Persist Hysteria2 UDP port hopping without flushing UFW
 [Unit]
-Description=ssctl Hysteria2 UDP Port Hopping (nftables table inet ssctl_hy2)
+Description=singtun Hysteria2 UDP Port Hopping (nftables table inet singtun_hy2)
 After=network.target ufw.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f ${nft_file}
-ExecStop=-/usr/sbin/nft delete table inet ssctl_hy2
+ExecStop=-/usr/sbin/nft delete table inet singtun_hy2
 
 [Install]
 WantedBy=multi-user.target
 EOF
   chmod 644 "${unit_file}"
   systemctl daemon-reload
-  systemctl enable --now ssctl-hy2-hop.service
-  log_info "Hysteria2 端口跳跃已启用: UDP ${hop_start}-${hop_end} -> :${HY2_PORT} (table inet ssctl_hy2)"
+  systemctl enable --now singtun-hy2-hop.service
+  log_info "Hysteria2 端口跳跃已启用: UDP ${hop_start}-${hop_end} -> :${HY2_PORT} (table inet singtun_hy2)"
 }
 
 configure_ntp() {
@@ -307,7 +307,7 @@ configure_ntp() {
 
 main() {
   require_root
-  acquire_ssctl_lock
+  acquire_singtun_lock
   detect_os >/dev/null
   detect_arch >/dev/null
   load_env
@@ -315,7 +315,7 @@ main() {
   validate_hy2_env_vars
 
   # 幂等清理早期版本遗留的孤立文件
-  rm -f /etc/ssctl/ssh_port
+  rm -f /etc/singtun/ssh_port
 
   if [[ "${1:-}" == "--post-deploy-sync" || "${1:-}" == "--prune-stale-ufw" ]]; then
     configure_vless_conn_guard
@@ -330,7 +330,7 @@ main() {
   apt-get install -y -qq ufw ca-certificates curl
 
   configure_ufw
-  if [[ "${SSCTL_DEFER_UFW_PRUNE:-false}" != "true" ]]; then
+  if [[ "${SINGTUN_DEFER_UFW_PRUNE:-false}" != "true" ]]; then
     configure_vless_conn_guard
     configure_hy2_port_hopping
   fi

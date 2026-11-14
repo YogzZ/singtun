@@ -2,47 +2,73 @@
 # scripts/lib/common.sh — 公共库：纯数据 .env 解析与原子写入、flock 互斥锁、临时目录清理、格式校验及订阅凭据派生
 set -euo pipefail
 
-if [[ "${SSCTL_COMMON_LOADED:-}" == "true" ]]; then
+if [[ "${SINGTUN_COMMON_LOADED:-}" == "true" ]]; then
   return 0
 fi
-SSCTL_COMMON_LOADED="true"
+SINGTUN_COMMON_LOADED="true"
 
 # 定位仓库根目录
 COMMON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${COMMON_LIB_DIR}/../.." && pwd)"
-PRIVATE_DIR="${SSCTL_PRIVATE_DIR:-${REPO_ROOT}/private}"
-ENV_FILE="${SSCTL_ENV_FILE:-${PRIVATE_DIR}/.env}"
+PRIVATE_DIR="${SINGTUN_PRIVATE_DIR:-${REPO_ROOT}/private}"
+ENV_FILE="${SINGTUN_ENV_FILE:-${PRIVATE_DIR}/.env}"
 SINGBOX_CHECKSUM_FILE="${REPO_ROOT}/scripts/lib/singbox.sha256"
 MIHOMO_CHECKSUM_FILE="${REPO_ROOT}/scripts/lib/mihomo.sha256"
 MIHOMO_PINNED_VERSION="v1.19.33"
 
-export REPO_ROOT PRIVATE_DIR ENV_FILE SINGBOX_CHECKSUM_FILE MIHOMO_CHECKSUM_FILE MIHOMO_PINNED_VERSION
+# ---- 默认配置常量（与 examples/env.example 保持一致）----
+DEFAULT_SINGBOX_VERSION="1.14.4"
+DEFAULT_SINGBOX_CLIENT_COMPAT="1.14"
+DEFAULT_SERVER_IPV6="false"
+DEFAULT_SERVER_LOG_LEVEL="warn"
+DEFAULT_VLESS_PORT="443"
+DEFAULT_REALITY_HANDSHAKE_PORT="8443"
+DEFAULT_UTLS_FINGERPRINT="chrome"
+DEFAULT_ENABLE_HY2="false"
+DEFAULT_HY2_PORT="8443"
+DEFAULT_HY2_OBFS="false"
+DEFAULT_ENABLE_SUBSCRIPTION="true"
+DEFAULT_DNS_DIRECT="223.5.5.5"
+DEFAULT_DNS_REMOTE="1.1.1.1"
+DEFAULT_RULESET_GEOSITE_CN="https://raw.githubusercontent.com/SagerNet/sing-geosite/23066e3b0833d1484916637dde2b5bae80178045/geosite-cn.srs"
+DEFAULT_RULESET_GEOIP_CN="https://raw.githubusercontent.com/SagerNet/sing-geoip/eb32cd6ed4a16fcb3bf9a36ccebf28e45716ae84/geoip-cn.srs"
+DEFAULT_RULESET_MIHOMO_GEOSITE_CN="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/458e716abd80ff8c6aee2b7d15c4f94b20e9d279/geo/geosite/cn.mrs"
+DEFAULT_RULESET_MIHOMO_GEOIP_CN="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/458e716abd80ff8c6aee2b7d15c4f94b20e9d279/geo/geoip/cn.mrs"
+DEFAULT_RULESET_SR_CN_DOMAIN="https://raw.githubusercontent.com/Loyalsoldier/surge-rules/d2ff19cde30a09df3e6a527cb3996ccd506cbfea/direct.txt"
+
+export REPO_ROOT PRIVATE_DIR ENV_FILE SINGBOX_CHECKSUM_FILE MIHOMO_CHECKSUM_FILE MIHOMO_PINNED_VERSION \
+  DEFAULT_SINGBOX_VERSION DEFAULT_SINGBOX_CLIENT_COMPAT DEFAULT_SERVER_IPV6 DEFAULT_SERVER_LOG_LEVEL \
+  DEFAULT_VLESS_PORT DEFAULT_REALITY_HANDSHAKE_PORT DEFAULT_UTLS_FINGERPRINT \
+  DEFAULT_ENABLE_HY2 DEFAULT_HY2_PORT DEFAULT_HY2_OBFS DEFAULT_ENABLE_SUBSCRIPTION \
+  DEFAULT_DNS_DIRECT DEFAULT_DNS_REMOTE \
+  DEFAULT_RULESET_GEOSITE_CN DEFAULT_RULESET_GEOIP_CN DEFAULT_RULESET_MIHOMO_GEOSITE_CN \
+  DEFAULT_RULESET_MIHOMO_GEOIP_CN DEFAULT_RULESET_SR_CN_DOMAIN
 
 # ---- 临时路径追踪与自动清理 ----
-SSCTL_TMP_PATHS=()
-SSCTL_TMP_GPG_HOMES=()
-SSCTL_LOADED_ENV_KEYS=()
+SINGTUN_TMP_PATHS=()
+SINGTUN_TMP_GPG_HOMES=()
+SINGTUN_LOADED_ENV_KEYS=()
 
-_ssctl_cleanup_tmp() {
+_singtun_cleanup_tmp() {
   local gh p
   if command -v gpgconf >/dev/null 2>&1; then
-    for gh in "${SSCTL_TMP_GPG_HOMES[@]:-}"; do
+    for gh in "${SINGTUN_TMP_GPG_HOMES[@]:-}"; do
       if [[ -n "${gh}" && -d "${gh}" ]]; then
         gpgconf --homedir "${gh}" --kill all >/dev/null 2>&1 || true
       fi
     done
   fi
-  for p in "${SSCTL_TMP_PATHS[@]:-}"; do
+  for p in "${SINGTUN_TMP_PATHS[@]:-}"; do
     if [[ -n "${p}" && ( -e "${p}" || -L "${p}" ) ]]; then
       rm -rf -- "${p}"
     fi
   done
 }
-trap _ssctl_cleanup_tmp EXIT
+trap _singtun_cleanup_tmp EXIT
 
 register_cleanup_path() {
   local p="$1"
-  SSCTL_TMP_PATHS+=("${p}")
+  SINGTUN_TMP_PATHS+=("${p}")
 }
 
 make_temp_dir() {
@@ -50,7 +76,7 @@ make_temp_dir() {
   local _dir
   _dir="$(mktemp -d)"
   chmod 700 "${_dir}"
-  SSCTL_TMP_PATHS+=("${_dir}")
+  SINGTUN_TMP_PATHS+=("${_dir}")
   printf -v "${_out_var}" '%s' "${_dir}"
 }
 
@@ -59,8 +85,8 @@ make_temp_gpg_home() {
   local _gh
   _gh="$(mktemp -d)"
   chmod 700 "${_gh}"
-  SSCTL_TMP_GPG_HOMES+=("${_gh}")
-  SSCTL_TMP_PATHS+=("${_gh}")
+  SINGTUN_TMP_GPG_HOMES+=("${_gh}")
+  SINGTUN_TMP_PATHS+=("${_gh}")
   printf -v "${_out_var}" '%s' "${_gh}"
 }
 
@@ -69,7 +95,7 @@ make_temp_file() {
   local _file
   _file="$(mktemp)"
   chmod 600 "${_file}"
-  SSCTL_TMP_PATHS+=("${_file}")
+  SINGTUN_TMP_PATHS+=("${_file}")
   printf -v "${_out_var}" '%s' "${_file}"
 }
 
@@ -128,12 +154,12 @@ ensure_private_dir_permissions() {
 }
 
 # 状态变更操作统一获取文件互斥锁，支持子进程重入
-acquire_ssctl_lock() {
-  if [[ "${SSCTL_LOCK_HELD:-false}" == "true" ]]; then
+acquire_singtun_lock() {
+  if [[ "${SINGTUN_LOCK_HELD:-false}" == "true" ]]; then
     return 0
   fi
   ensure_private_dir_permissions
-  local lock_file="${PRIVATE_DIR}/.ssctl.lock"
+  local lock_file="${PRIVATE_DIR}/.singtun.lock"
   exec 9>"${lock_file}"
   chmod 600 "${lock_file}" 2>/dev/null || true
   if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
@@ -151,18 +177,18 @@ acquire_ssctl_lock() {
   fi
   if command -v flock >/dev/null 2>&1; then
     if ! flock -w 30 9; then
-      die "无法获取操作互斥锁 (${lock_file})：另一个 ssctl 进程正在运行。"
+      die "无法获取操作互斥锁 (${lock_file})：另一个 singtun 进程正在运行。"
     fi
   fi
-  export SSCTL_LOCK_HELD="true"
+  export SINGTUN_LOCK_HELD="true"
 }
 
 # 判断服务端是否已完成部署（沙箱/非 root 测试模式下不触碰宿主 /etc/sing-box）
 is_server_deployed() {
-  if [[ "${SSCTL_ALLOW_NONROOT_SUB:-false}" == "true" ]]; then
+  if [[ "${SINGTUN_ALLOW_NONROOT_SUB:-false}" == "true" ]]; then
     return 1
   fi
-  if [[ -n "${SSCTL_PRIVATE_DIR:-}" && "${SSCTL_PRIVATE_DIR}" != "${REPO_ROOT}/private" ]]; then
+  if [[ -n "${SINGTUN_PRIVATE_DIR:-}" && "${SINGTUN_PRIVATE_DIR}" != "${REPO_ROOT}/private" ]]; then
     return 1
   fi
   [[ -f "/etc/sing-box/10-inbound-vless.json" ]] && systemctl is-enabled --quiet sing-box 2>/dev/null
@@ -174,11 +200,11 @@ _stat_file_uid() {
   stat -L -c '%u' "${target}" 2>/dev/null || stat -L -f '%u' "${target}" 2>/dev/null || echo ""
 }
 
-is_allowed_ssctl_env_key() {
+is_allowed_singtun_env_key() {
   local key="$1"
   # 显式拦截运行环境、动态链接器、Shell 启动与代理劫持变量
   case "${key}" in
-    PATH|LD_*|BASH*|ENV|IFS|HOME|USER|LOGNAME|UID|EUID|GID|GROUPS|SUDO_*|SHELL|SHELLOPTS|PS1|PS2|PS4|PROMPT_COMMAND|CDPATH|GLOBIGNORE|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|PERL5LIB|RUBYOPT|NODE_OPTIONS|JAVA_TOOL_OPTIONS|OPENSSL_CONF|CURL_HOME|GIT_*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|TMPDIR|TEMP|TMP|TERM|LANG|LC_*|SSCTL_*)
+    PATH|LD_*|BASH*|ENV|IFS|HOME|USER|LOGNAME|UID|EUID|GID|GROUPS|SUDO_*|SHELL|SHELLOPTS|PS1|PS2|PS4|PROMPT_COMMAND|CDPATH|GLOBIGNORE|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|PERL5LIB|RUBYOPT|NODE_OPTIONS|JAVA_TOOL_OPTIONS|OPENSSL_CONF|CURL_HOME|GIT_*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|TMPDIR|TEMP|TMP|TERM|LANG|LC_*|SINGTUN_*|SSCTL_*)
       return 1
       ;;
   esac
@@ -352,7 +378,7 @@ parse_env_data_file() {
     if [[ "${_parsed_type}" != "KV" ]]; then
       continue
     fi
-    if [[ "${enforce_allowlist}" == "true" ]] && ! is_allowed_ssctl_env_key "${_parsed_key}"; then
+    if [[ "${enforce_allowlist}" == "true" ]] && ! is_allowed_singtun_env_key "${_parsed_key}"; then
       log_error "${label}:${line_no}: 拒绝未授权或高危环境变量键名 '${_parsed_key}'"
       return 1
     fi
@@ -383,7 +409,7 @@ list_env_file_keys() {
   [[ -f "${file}" ]] || return 0
   local -a keys=() vals=()
   local enforce="false"
-  if [[ "${file}" == "${ENV_FILE}" || "${file}" == "${SSCTL_ENV_FILE:-}" || "$(basename "${file}")" == ".env" ]]; then
+  if [[ "${file}" == "${ENV_FILE}" || "${file}" == "${SINGTUN_ENV_FILE:-}" || "$(basename "${file}")" == ".env" ]]; then
     enforce="true"
   fi
   if ! parse_env_data_file "${file}" "${enforce}" keys vals || (( ${#keys[@]} != ${#vals[@]} )); then
@@ -395,9 +421,115 @@ list_env_file_keys() {
   done
 }
 
+is_reserved_example_domain() {
+  local domain="${1,,}"
+  [[ "${domain}" =~ ^(.*\.)?(example\.(com|org|net)|localhost|invalid|test|example)$ ]]
+}
+
+is_reserved_example_email() {
+  local email="${1,,}"
+  local edom="${email#*@}"
+  [[ "${edom}" != "${email}" ]] || return 1
+  is_reserved_example_domain "${edom}"
+}
+
+derive_default_acme_email() {
+  local d="${1,,}"
+  local IFS='.'
+  local -a labels=()
+  read -r -a labels <<< "${d}"
+  local n="${#labels[@]}"
+  local base="${d}"
+  if (( n >= 3 )); then
+    local sld="${labels[n-2]}.${labels[n-1]}"
+    case "${sld}" in
+      co.uk|org.uk|ac.uk|gov.uk|com.cn|net.cn|org.cn|gov.cn|edu.cn|com.hk|com.tw|com.sg|com.au|co.jp|co.kr|eu.org)
+        base="${d}"
+        ;;
+      *)
+        base="${d#*.}"
+        ;;
+    esac
+  fi
+  printf 'admin@%s' "${base}"
+}
+
+apply_default_env_vars() {
+  local k def_var
+  for k in \
+    SINGBOX_VERSION \
+    SINGBOX_CLIENT_COMPAT \
+    SERVER_IPV6 \
+    SERVER_LOG_LEVEL \
+    VLESS_PORT \
+    REALITY_HANDSHAKE_PORT \
+    UTLS_FINGERPRINT \
+    ENABLE_HY2 \
+    HY2_PORT \
+    HY2_OBFS \
+    ENABLE_SUBSCRIPTION \
+    DNS_DIRECT \
+    DNS_REMOTE \
+    RULESET_GEOSITE_CN \
+    RULESET_GEOIP_CN \
+    RULESET_MIHOMO_GEOSITE_CN \
+    RULESET_MIHOMO_GEOIP_CN \
+    RULESET_SR_CN_DOMAIN; do
+    if [[ -z "${!k:-}" ]]; then
+      def_var="DEFAULT_${k}"
+      printf -v "${k}" '%s' "${!def_var}"
+      export "${k?}"
+      SINGTUN_LOADED_ENV_KEYS+=("${k}")
+    fi
+  done
+
+  if [[ -z "${ACME_EMAIL:-}" ]] && is_valid_domain "${SERVER_DOMAIN:-}"; then
+    local derived_email
+    derived_email="$(derive_default_acme_email "${SERVER_DOMAIN}")"
+    printf -v ACME_EMAIL '%s' "${derived_email}"
+    export ACME_EMAIL
+    SINGTUN_LOADED_ENV_KEYS+=("ACME_EMAIL")
+  fi
+}
+
+detect_public_ipv4() {
+  local ip=""
+  if [[ -n "${SINGTUN_PUBLIC_IPV4_OVERRIDE:-}" ]]; then
+    ip="${SINGTUN_PUBLIC_IPV4_OVERRIDE}"
+    if is_valid_ipv4 "${ip}" && ! is_non_public_ipv4 "${ip}" "true"; then
+      printf '%s' "${ip}"
+      return 0
+    fi
+    return 1
+  fi
+
+  if command -v ip >/dev/null 2>&1; then
+    while IFS= read -r ip; do
+      [[ -z "${ip}" ]] && continue
+      if is_valid_ipv4 "${ip}" && ! is_non_public_ipv4 "${ip}" "true"; then
+        printf '%s' "${ip}"
+        return 0
+      fi
+    done < <(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    local endpoint
+    for endpoint in "https://api.ipify.org" "https://api.ip.sb/ip" "https://ipv4.icanhazip.com"; do
+      ip="$(curl -4 -fsSL --max-time 3 "${endpoint}" 2>/dev/null | tr -d '[:space:]' || true)"
+      if [[ -n "${ip}" ]] && is_valid_ipv4 "${ip}" && ! is_non_public_ipv4 "${ip}" "true"; then
+        printf '%s' "${ip}"
+        return 0
+      fi
+    done
+  fi
+
+  return 1
+}
+
 load_env() {
   if [[ ! -f "${ENV_FILE}" ]]; then
-    die "未找到配置文件 ${ENV_FILE}，请先执行 './ssctl init' 并填写参数。"
+    die "未找到配置文件 ${ENV_FILE}，请先执行 './singtun init'（或 './singtun setup'）并填写参数。"
   fi
 
   local perm
@@ -427,8 +559,8 @@ load_env() {
   fi
 
   local _k
-  if (( ${#SSCTL_LOADED_ENV_KEYS[@]} > 0 )); then
-    for _k in "${SSCTL_LOADED_ENV_KEYS[@]}"; do
+  if (( ${#SINGTUN_LOADED_ENV_KEYS[@]} > 0 )); then
+    for _k in "${SINGTUN_LOADED_ENV_KEYS[@]}"; do
       if [[ -n "${_k}" ]]; then
         unset "${_k}" || true
       fi
@@ -442,12 +574,13 @@ load_env() {
     esac
   done < <(env)
 
-  SSCTL_LOADED_ENV_KEYS=("${parsed_keys[@]}")
+  SINGTUN_LOADED_ENV_KEYS=("${parsed_keys[@]}")
   local idx
   for (( idx = 0; idx < ${#parsed_keys[@]}; idx++ )); do
     printf -v "${parsed_keys[idx]}" '%s' "${parsed_vals[idx]}"
     export "${parsed_keys[idx]}"
   done
+  apply_default_env_vars
 }
 
 _preserve_env_owner_and_mode() {
@@ -481,7 +614,7 @@ env_file_has_key() {
   [[ -f "${file}" ]] || return 1
   local -a _hk_keys=() _hk_vals=()
   local enforce="false"
-  if [[ "${file}" == "${ENV_FILE}" || "${file}" == "${SSCTL_ENV_FILE:-}" || "$(basename "${file}")" == ".env" ]]; then
+  if [[ "${file}" == "${ENV_FILE}" || "${file}" == "${SINGTUN_ENV_FILE:-}" || "$(basename "${file}")" == ".env" ]]; then
     enforce="true"
   fi
   parse_env_data_file "${file}" "${enforce}" _hk_keys _hk_vals || return 1
@@ -561,7 +694,7 @@ env_file_apply_batch() {
   done
 
   local enforce_allowlist="false"
-  if [[ "${file}" == "${ENV_FILE}" || "${file}" == "${SSCTL_ENV_FILE:-}" || "$(basename "${file}")" == ".env" ]]; then
+  if [[ "${file}" == "${ENV_FILE}" || "${file}" == "${SINGTUN_ENV_FILE:-}" || "$(basename "${file}")" == ".env" ]]; then
     enforce_allowlist="true"
   fi
   if ! validate_env_data_file "${work_file}" "${enforce_allowlist}"; then
@@ -673,7 +806,7 @@ is_valid_semver() {
 is_reserved_sub_name() {
   local name="$1"
   case "${name}" in
-    init|deploy|add|list|ls|show|reset|rotate|del|delete|remove|rm|revoke|flush|check|status|logs|restart|renew|upgrade|uninstall|sub|all|help|none|default)
+    init|setup|deploy|add|list|ls|show|reset|rotate|del|delete|remove|rm|revoke|flush|check|status|logs|restart|renew|upgrade|uninstall|sub|all|help|none|default|singtun)
       return 0
       ;;
     *)
@@ -689,7 +822,7 @@ is_valid_sub_name() {
 
 is_characteristic_sub_prefix() {
   local pfx="$1"
-  [[ "${pfx}" =~ ^(sub|subscribe|subscription|proxy|clash|mihomo|singbox|v2ray|hy2|hysteria) ]]
+  [[ "${pfx}" =~ ^(sub|subscribe|subscription|proxy|clash|mihomo|singbox|singtun|v2ray|hy2|hysteria) ]]
 }
 
 is_valid_sub_prefix() {
@@ -903,7 +1036,7 @@ validate_ruleset_urls() {
   done
 }
 
-# 只读检测宿主当前活跃的 SSH 监听端口（供 00-preflight / 10-harden / ssctl uninstall 共用，防止误封锁 SSH）
+# 只读检测宿主当前活跃的 SSH 监听端口（供 00-preflight / 10-harden / singtun uninstall 共用，防止误封锁 SSH）
 detect_active_ssh_ports() {
   local -A seen=()
   local -a ports=()
@@ -1153,17 +1286,17 @@ derive_hy2_password() {
   local uuid="$1"
   local secret="${REALITY_PRIVATE_KEY:-}"
   [[ -n "${secret}" ]] || die "derive_hy2_password 需要已加载 REALITY_PRIVATE_KEY"
-  printf '%s:%s:ssctl-hy2-v2' "${secret}" "${uuid}" | sha256sum | awk '{print substr($1, 1, 32)}'
+  printf '%s:%s:singtun-hy2-v2' "${secret}" "${uuid}" | sha256sum | awk '{print substr($1, 1, 32)}'
 }
 
 # 基于实例 REALITY_PRIVATE_KEY 确定性派生 Hysteria2 salamander 混淆密码
 derive_hy2_obfs_password() {
   local secret="${REALITY_PRIVATE_KEY:-}"
   [[ -n "${secret}" ]] || die "derive_hy2_obfs_password 需要已加载 REALITY_PRIVATE_KEY"
-  printf '%s:ssctl-hy2-obfs-v1' "${secret}" | sha256sum | awk '{print substr($1, 1, 32)}'
+  printf '%s:singtun-hy2-obfs-v1' "${secret}" | sha256sum | awk '{print substr($1, 1, 32)}'
 }
 
-# 订阅 URL 与节点链接共用构造函数（ssctl 与 50-gen-clients.sh 统一复用）
+# 订阅 URL 与节点链接共用构造函数（singtun 与 50-gen-clients.sh 统一复用）
 urlencode_str() {
   local LC_ALL=C
   local s="$1"
@@ -1224,14 +1357,14 @@ build_hy2_uri() {
     "${tag}"
 }
 
-# 当 SERVER_IPV6=true 时，收集服务端本机全局单播 IPv6 地址（每行输出一个 <addr>/128；支持 SSCTL_SELF_IPV6_OVERRIDE 测试覆写）
+# 当 SERVER_IPV6=true 时，收集服务端本机全局单播 IPv6 地址（每行输出一个 <addr>/128；支持 SINGTUN_SELF_IPV6_OVERRIDE 测试覆写）
 collect_server_self_ipv6_cidrs() {
   if [[ "${SERVER_IPV6:-false}" != "true" ]]; then
     return 0
   fi
   local v6_item v6_addr
-  if [[ -n "${SSCTL_SELF_IPV6_OVERRIDE:-}" ]]; then
-    for v6_item in ${SSCTL_SELF_IPV6_OVERRIDE}; do
+  if [[ -n "${SINGTUN_SELF_IPV6_OVERRIDE:-}" ]]; then
+    for v6_item in ${SINGTUN_SELF_IPV6_OVERRIDE}; do
       v6_item="${v6_item%%/*}"
       [[ -n "${v6_item}" ]] && printf '%s/128\n' "${v6_item}"
     done

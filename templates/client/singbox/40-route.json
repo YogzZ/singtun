@@ -52,6 +52,11 @@
         "outbound": "direct"
       },
       {
+        "network": "udp",
+        "port": 123,
+        "outbound": "direct"
+      },
+      {
         "clash_mode": "direct",
         "outbound": "direct"
       },

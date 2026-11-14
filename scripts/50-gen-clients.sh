@@ -8,7 +8,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 CLIENT_TPL_DIR="${REPO_ROOT}/templates/client"
 OUT_ROOT="${PRIVATE_DIR}/out"
-SUB_WEB_BASE="${SSCTL_SUB_WEB_BASE_OVERRIDE:-/var/lib/ssctl}"
+SUB_WEB_BASE="${SINGTUN_SUB_WEB_BASE_OVERRIDE:-/var/lib/singtun}"
 SUB_WEB_LINK="${SUB_WEB_BASE}/sub-web"
 SUB_RELEASES_DIR="${SUB_WEB_BASE}/releases"
 
@@ -272,21 +272,23 @@ render_sub_singbox_json() {
     "${CLIENT_TPL_DIR}/singbox/40-route.json" > "${out_file}"
 }
 
-# Shadowrocket 国内主流站点与高频 CDN 后缀单一权威列表（同时渲染 [Rule] 兜底直连与 [Host] 国内 DNS）
+# Shadowrocket 国内底座基础设施与高频 CDN 后缀单一权威列表（同时渲染 [Rule] 兜底直连与 [Host] 国内加密 DoH）
+# 准入边界：仅收录操作系统/Apple 核心国内服务、国家级支付清算、头部公有云/CDN 与国民级定位底座；
+# 严禁收录长尾垂直应用或第三方广告/统计/P2P SDK 域名（长尾域名交由远程不可变 DOMAIN-SET 路由）。
 SR_CN_FALLBACK_SUFFIXES=(
   # 百度
   "baidu.com" "bdstatic.com" "bdimg.com" "baidubce.com"
   # 腾讯 / 微信
-  "qq.com" "weixin.qq.com" "wechat.com" "servicewechat.com" "tenpay.com" "wechatpay.cn"
+  "qq.com" "weixin.qq.com" "weixin.com" "weixinbridge.com" "wechat.com" "servicewechat.com" "tenpay.com" "wechatpay.cn"
   "gtimg.cn" "gtimg.com" "qpic.cn" "qlogo.cn" "myqcloud.com" "tencent-cloud.net"
   # 阿里 / 淘宝 / 支付宝
   "taobao.com" "tmall.com" "alicdn.com" "alikunlun.com" "alikunlun.net"
   "tbcache.com" "mmstat.com" "alipay.com" "alipayobjects.com" "aliyuncs.com"
-  "aliyun.com" "alibaba.com" "1688.com" "dingtalk.com"
-  # 字节跳动 / 抖音
+  "aliyun.com" "alibaba.com" "alibabausercontent.com" "myalicdn.com" "1688.com" "dingtalk.com"
+  # 字节跳动 / 抖音 / 火山引擎
   "bytedance.com" "douyin.com" "douyinvod.com" "douyinpic.com" "douyincdn.com"
   "byteimg.com" "bytednsdoc.com" "pstatp.com" "snssdk.com" "amemv.com"
-  "toutiao.com" "feishu.cn"
+  "toutiao.com" "feishu.cn" "volces.com"
   # 哔哩哔哩
   "bilibili.com" "bilivideo.com" "bilivideo.cn" "biliapi.net" "biliapi.com" "hdslb.com"
   # 小红书 / 快手
@@ -299,6 +301,8 @@ SR_CN_FALLBACK_SUFFIXES=(
   "163.com" "126.com" "126.net" "127.net" "netease.com"
   "sina.com.cn" "sinaimg.cn" "weibo.com" "weibo.cn" "weibocdn.com"
   "zhihu.com" "zhimg.com" "douban.com" "doubanio.com" "csdn.net"
+  # 支付清算与国民级定位地图底座
+  "95516.com" "amap.com" "autonavi.com"
   # 长视频 / 出行 / 终端厂商
   "iqiyi.com" "iqiyipic.com" "youku.com" "ykimg.com" "mgtv.com"
   "ctrip.com" "c-ctrip.com" "12306.cn"
@@ -310,7 +314,7 @@ SR_CN_FALLBACK_SUFFIXES=(
   "ls.apple.com" "gs-loc.apple.com" "gs-loc-cn.apple.com" "iphone-ld.apple.com" "maps.apple.com" "apple-mapkit.com"
   "weatherkit.apple.com" "weather-data.apple.com" "weather-edge.apple.com" "weather-map.apple.com" "weather-map2.apple.com"
   # Apple 系统校时 (NTP UDP 123，避免落入 VLESS Vision 触发 UDP flow mismatch)、推送与账号配置初始化
-  "time.apple.com" "push.apple.com" "ess.apple.com" "configuration.apple.com" "xp.apple.com"
+  "time.apple.com" "time.asia.apple.com" "push.apple.com" "ess.apple.com" "configuration.apple.com" "xp.apple.com"
   "swallow.apple.com" "pancake.apple.com" "smp-device-content.apple.com" "ipcdn.apple.com" "init-p01md.apple.com" "cds.apple.com"
   "guzzoni.apple.com" "smoot.apple.com"
   # Apple 系统更新、固件分发与证书 OCSP/CRL 吊销校验
@@ -543,7 +547,7 @@ render_urls_summary() {
 
   cat > "${out_file}" <<EOF
 # Subscription: ${sub}
-# Security Warning: Subscription URLs contain full proxy credentials. Do NOT share publicly; run 'sudo ./ssctl reset ${sub}' immediately if leaked.
+# Security Warning: Subscription URLs contain full proxy credentials. Do NOT share publicly; run 'sudo ./singtun reset ${sub}' immediately if leaked.
 ENABLE_SUBSCRIPTION=${ENABLE_SUBSCRIPTION:-true}
 ENABLE_HY2=${ENABLE_HY2:-false}
 
@@ -569,7 +573,7 @@ EOF
 
 validate_singbox_config_strict() {
   local cfg_file="$1"
-  local sb_bin="${SSCTL_SINGBOX_BIN:-sing-box}"
+  local sb_bin="${SINGTUN_SINGBOX_BIN:-sing-box}"
   local compat_mode="${SINGBOX_CLIENT_COMPAT:-1.14}"
   local check_out=""
   if ! check_out="$("${sb_bin}" check -c "${cfg_file}" 2>&1)"; then
@@ -584,7 +588,7 @@ validate_singbox_config_strict() {
 
 validate_mihomo_config_if_available() {
   local cfg_file="$1"
-  local mihomo_bin="${SSCTL_MIHOMO_BIN:-}"
+  local mihomo_bin="${SINGTUN_MIHOMO_BIN:-}"
   if [[ -z "${mihomo_bin}" ]] && command -v mihomo >/dev/null 2>&1; then
     mihomo_bin="$(command -v mihomo)"
   fi
@@ -592,7 +596,7 @@ validate_mihomo_config_if_available() {
     return 0
   fi
 
-  local workdir="${SSCTL_MIHOMO_WORKDIR:-}"
+  local workdir="${SINGTUN_MIHOMO_WORKDIR:-}"
   if [[ -z "${workdir}" || ! -f "${workdir}/rules/geosite-cn.mrs" || ! -f "${workdir}/rules/geoip-cn.mrs" ]]; then
     return 0
   fi
@@ -641,7 +645,7 @@ prune_stale_sub_dirs() {
 # 收敛公网订阅历史版本目录：ENABLE_SUBSCRIPTION=false 时清空全部；为 true 时保留当前软链目标 + 最近 1 个历史成功版本（最多 2 个）
 finalize_public_releases() {
   local enable_sub="${ENABLE_SUBSCRIPTION:-true}"
-  local keep_max="${SSCTL_SUB_RELEASE_KEEP:-2}"
+  local keep_max="${SINGTUN_SUB_RELEASE_KEEP:-2}"
 
   if [[ "${enable_sub}" != "true" ]]; then
     if [[ -L "${SUB_WEB_LINK}" || -e "${SUB_WEB_LINK}" ]]; then
@@ -704,13 +708,13 @@ finalize_public_releases() {
 # 基于版本化目录 + ln -sfn + mv -Tf 的符号链接原子发布（兼容 coreutils 8.32，零 404 窗口；事务期延迟清理旧目录）
 publish_public_subscriptions() {
   local enable_sub="${ENABLE_SUBSCRIPTION:-true}"
-  local defer_prune="${SSCTL_DEFER_RELEASE_PRUNE:-false}"
+  local defer_prune="${SINGTUN_DEFER_RELEASE_PRUNE:-false}"
 
   if [[ "${enable_sub}" != "true" ]]; then
     if [[ -L "${SUB_WEB_LINK}" || -e "${SUB_WEB_LINK}" ]]; then
       rm -rf -- "${SUB_WEB_LINK}"
     fi
-    if [[ "${SSCTL_FAIL_AFTER_SUB_WEB_SWITCH:-false}" == "true" ]]; then
+    if [[ "${SINGTUN_FAIL_AFTER_SUB_WEB_SWITCH:-false}" == "true" ]]; then
       die "注入测试故障：关闭公网订阅移除软链后触发失败"
     fi
     if [[ "${defer_prune}" == "true" ]]; then
@@ -769,7 +773,7 @@ publish_public_subscriptions() {
   ln -sfn "${new_rel}" "${tmp_link}"
   mv -Tf "${tmp_link}" "${SUB_WEB_LINK}"
 
-  if [[ "${SSCTL_FAIL_AFTER_SUB_WEB_SWITCH:-false}" == "true" ]]; then
+  if [[ "${SINGTUN_FAIL_AFTER_SUB_WEB_SWITCH:-false}" == "true" ]]; then
     die "注入测试故障：公网订阅软链切换完成后触发失败"
   fi
 
@@ -843,18 +847,18 @@ main() {
   fi
 
   if [[ "${1:-}" == "--finalize-releases" ]]; then
-    acquire_ssctl_lock
+    acquire_singtun_lock
     load_env
-    if [[ "${EUID:-$(id -u)}" -eq 0 || -n "${SSCTL_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
+    if [[ "${EUID:-$(id -u)}" -eq 0 || -n "${SINGTUN_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
       finalize_public_releases
     fi
     return 0
   fi
 
   local has_singbox="false"
-  local sb_bin="${SSCTL_SINGBOX_BIN:-}"
+  local sb_bin="${SINGTUN_SINGBOX_BIN:-}"
   if [[ -n "${sb_bin}" ]]; then
-    [[ -x "${sb_bin}" ]] || die "指定的 SSCTL_SINGBOX_BIN 不可执行: ${sb_bin}"
+    [[ -x "${sb_bin}" ]] || die "指定的 SINGTUN_SINGBOX_BIN 不可执行: ${sb_bin}"
     has_singbox="true"
   elif command -v sing-box >/dev/null 2>&1; then
     has_singbox="true"
@@ -869,11 +873,11 @@ main() {
         shift
         ;;
       -*)
-        die "未知选项: $1（用法: ./ssctl flush [name] [--local-only]）"
+        die "未知选项: $1（用法: ./singtun flush [name] [--local-only]）"
         ;;
       *)
         if [[ -n "${target_sub}" ]]; then
-          die "多余的位置参数: $1（用法: ./ssctl flush [name] [--local-only]）"
+          die "多余的位置参数: $1（用法: ./singtun flush [name] [--local-only]）"
         fi
         target_sub="$1"
         shift
@@ -881,11 +885,11 @@ main() {
     esac
   done
 
-  if [[ "${local_only}" != "true" && "${EUID:-$(id -u)}" -ne 0 && -z "${SSCTL_SUB_WEB_BASE_OVERRIDE:-}" && "${SSCTL_ALLOW_NONROOT_UPGRADE_TEST:-false}" != "true" ]] && is_server_deployed; then
-    die "检测到服务端已部署，同步公网订阅目录需 root 权限，请使用: sudo ./ssctl flush（若仅需重新生成本地 private/out/，请追加 --local-only）"
+  if [[ "${local_only}" != "true" && "${EUID:-$(id -u)}" -ne 0 && -z "${SINGTUN_SUB_WEB_BASE_OVERRIDE:-}" && "${SINGTUN_ALLOW_NONROOT_UPGRADE_TEST:-false}" != "true" ]] && is_server_deployed; then
+    die "检测到服务端已部署，同步公网订阅目录需 root 权限，请使用: sudo ./singtun flush（若仅需重新生成本地 private/out/，请追加 --local-only）"
   fi
 
-  acquire_ssctl_lock
+  acquire_singtun_lock
   load_env
   require_cmd jq base64
   require_vars \
@@ -917,7 +921,7 @@ main() {
       die "无法从 REALITY_PRIVATE_KEY 派生公钥，请检查 REALITY_PRIVATE_KEY 是否为合法 X25519 私钥"
     fi
     if [[ "${REALITY_PUBLIC_KEY}" != "${expected_reality_pub}" ]]; then
-      die "REALITY_PUBLIC_KEY 与 REALITY_PRIVATE_KEY 不匹配，请核对或运行 './ssctl init' 恢复匹配的公钥"
+      die "REALITY_PUBLIC_KEY 与 REALITY_PRIVATE_KEY 不匹配，请核对或运行 './singtun init' 恢复匹配的公钥"
     fi
   fi
   is_valid_short_id "${REALITY_SHORT_ID}" || die "REALITY_SHORT_ID 必须为 2-16 位偶数长度十六进制字符串: ${REALITY_SHORT_ID}"
@@ -1021,18 +1025,18 @@ main() {
   if [[ "${local_only}" != "true" ]]; then
     if is_server_deployed; then
       if [[ "${ENABLE_HY2:-false}" == "true" && ! -f "/etc/sing-box/20-inbound-hy2.json" ]]; then
-        log_warn "当前 ENABLE_HY2=true，但服务端尚未部署 /etc/sing-box/20-inbound-hy2.json（或未放行防火墙）；请运行 'sudo ./ssctl deploy' 使 Hysteria2 服务端生效。"
-      elif [[ "${ENABLE_HY2:-false}" == "true" && -n "${HY2_HOP_PORTS:-}" && ! -f "/etc/systemd/system/ssctl-hy2-hop.service" ]]; then
-        log_warn "当前已配置 HY2_HOP_PORTS=${HY2_HOP_PORTS}，但服务端尚未部署端口跳跃规则 (ssctl-hy2-hop.service)；请运行 'sudo ./ssctl deploy' 同步防火墙与 nftables。"
+        log_warn "当前 ENABLE_HY2=true，但服务端尚未部署 /etc/sing-box/20-inbound-hy2.json（或未放行防火墙）；请运行 'sudo ./singtun deploy' 使 Hysteria2 服务端生效。"
+      elif [[ "${ENABLE_HY2:-false}" == "true" && -n "${HY2_HOP_PORTS:-}" && ! -f "/etc/systemd/system/singtun-hy2-hop.service" ]]; then
+        log_warn "当前已配置 HY2_HOP_PORTS=${HY2_HOP_PORTS}，但服务端尚未部署端口跳跃规则 (singtun-hy2-hop.service)；请运行 'sudo ./singtun deploy' 同步防火墙与 nftables。"
       elif [[ "${ENABLE_HY2:-false}" == "true" && "${HY2_OBFS:-false}" == "true" ]] && [[ -r "/etc/sing-box/20-inbound-hy2.json" ]] && ! grep -Fq '"salamander"' "/etc/sing-box/20-inbound-hy2.json"; then
-        log_warn "当前 HY2_OBFS=true，但服务端 /etc/sing-box/20-inbound-hy2.json 尚未启用 salamander 混淆；请运行 'sudo ./ssctl deploy' 同步服务端配置。"
+        log_warn "当前 HY2_OBFS=true，但服务端 /etc/sing-box/20-inbound-hy2.json 尚未启用 salamander 混淆；请运行 'sudo ./singtun deploy' 同步服务端配置。"
       elif [[ "${ENABLE_HY2:-false}" == "true" && "${HY2_OBFS:-false}" != "true" ]] && [[ -r "/etc/sing-box/20-inbound-hy2.json" ]] && grep -Fq '"salamander"' "/etc/sing-box/20-inbound-hy2.json"; then
-        log_warn "当前 HY2_OBFS=false，但服务端 /etc/sing-box/20-inbound-hy2.json 仍启用着 salamander 混淆；请运行 'sudo ./ssctl deploy' 同步服务端配置。"
-      elif [[ "${ENABLE_HY2:-false}" != "true" && ( -f "/etc/sing-box/20-inbound-hy2.json" || -f "/etc/systemd/system/ssctl-hy2-hop.service" ) ]]; then
-        log_warn "当前 ENABLE_HY2=false，但服务端仍残留 Hysteria2 入站或端口跳跃配置；请运行 'sudo ./ssctl deploy' 关闭服务端入站并收敛防火墙。"
+        log_warn "当前 HY2_OBFS=false，但服务端 /etc/sing-box/20-inbound-hy2.json 仍启用着 salamander 混淆；请运行 'sudo ./singtun deploy' 同步服务端配置。"
+      elif [[ "${ENABLE_HY2:-false}" != "true" && ( -f "/etc/sing-box/20-inbound-hy2.json" || -f "/etc/systemd/system/singtun-hy2-hop.service" ) ]]; then
+        log_warn "当前 ENABLE_HY2=false，但服务端仍残留 Hysteria2 入站或端口跳跃配置；请运行 'sudo ./singtun deploy' 关闭服务端入站并收敛防火墙。"
       fi
     fi
-    if [[ "${EUID:-$(id -u)}" -eq 0 || -n "${SSCTL_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
+    if [[ "${EUID:-$(id -u)}" -eq 0 || -n "${SINGTUN_SUB_WEB_BASE_OVERRIDE:-}" ]]; then
       publish_public_subscriptions
     else
       log_warn "当前非 root 运行，已仅更新本地 ${OUT_ROOT}（公网订阅静态目录需使用 sudo 同步）。"

@@ -155,7 +155,7 @@ main() {
   fi
 
   if is_characteristic_sub_prefix "${SUB_PATH_PREFIX}"; then
-    die "SUB_PATH_PREFIX 不得以明显特征词开头 (${SUB_PATH_PREFIX})，请通过 './ssctl init' 使用随机前缀。"
+    die "SUB_PATH_PREFIX 不得以明显特征词开头 (${SUB_PATH_PREFIX})，请通过 './singtun init' 使用随机前缀。"
   fi
   if ! is_valid_sub_prefix "${SUB_PATH_PREFIX}"; then
     die "SUB_PATH_PREFIX 格式非法（须为 12-32 位小写字母数字随机串，严禁含斜杠或特殊字符）: ${SUB_PATH_PREFIX}"
@@ -191,6 +191,9 @@ main() {
   if [[ "${SKIP_OS_CHECK:-false}" != "true" && "${SKIP_DNS_CHECK:-false}" != "true" ]]; then
     reject_doc_ip="true"
   fi
+  if [[ "${SINGTUN_FORCE_PRODUCTION_CHECKS:-false}" == "true" ]]; then
+    reject_doc_ip="true"
+  fi
   if is_non_public_ipv4 "${SERVER_IP}" "${reject_doc_ip}"; then
     die "SERVER_IP 不能为内网、回环、保留或文档示例地址: ${SERVER_IP}"
   fi
@@ -199,6 +202,9 @@ main() {
   fi
   if ! is_valid_email "${ACME_EMAIL}"; then
     die "ACME_EMAIL 不是合法的邮箱地址: ${ACME_EMAIL}"
+  fi
+  if [[ "${reject_doc_ip}" == "true" ]] && is_reserved_example_email "${ACME_EMAIL}"; then
+    die "ACME_EMAIL 不能使用保留示例邮箱 (${ACME_EMAIL})，Let's Encrypt 将拒绝签发证书，请改为有效邮箱或运行 './singtun setup' 自动派生。"
   fi
   if [[ -n "${ACME_NOTIFY_HOOK:-}" ]] && ! is_valid_acme_notify_hook "${ACME_NOTIFY_HOOK}"; then
     die "ACME_NOTIFY_HOOK 格式非法（仅允许小写字母、数字、下划线及逗号分隔的官方钩子名）: ${ACME_NOTIFY_HOOK}"
@@ -246,7 +252,7 @@ main() {
       die "无法由 REALITY_PRIVATE_KEY 派生 X25519 公钥，请检查私钥格式是否有效！"
     fi
     if [[ "${REALITY_PUBLIC_KEY}" != "${expected_reality_pub}" ]]; then
-      die "REALITY_PUBLIC_KEY 与 REALITY_PRIVATE_KEY 不匹配（当前: ${REALITY_PUBLIC_KEY}，预期: ${expected_reality_pub}）；请修正或清空 REALITY_PUBLIC_KEY 后重跑 ./ssctl init 自动修复。"
+      die "REALITY_PUBLIC_KEY 与 REALITY_PRIVATE_KEY 不匹配（当前: ${REALITY_PUBLIC_KEY}，预期: ${expected_reality_pub}）；请修正或清空 REALITY_PUBLIC_KEY 后重跑 ./singtun init 自动修复。"
     fi
   fi
   if ! is_valid_utls_fingerprint "${UTLS_FINGERPRINT}"; then
@@ -315,7 +321,7 @@ main() {
   fi
 
   if (( sub_count == 0 )); then
-    log_info "当前 SUBSCRIPTIONS 为空（零预设用户待机）；部署完成后可通过 'sudo ./ssctl add [name]' 按需创建订阅。"
+    log_info "当前 SUBSCRIPTIONS 为空（零预设用户待机）；部署完成后可通过 'sudo ./singtun add [name]' 按需创建订阅。"
   else
     log_info "已校验 ${sub_count} 条订阅的名称、独立 UUID 与 256-bit 订阅令牌合法。"
   fi

@@ -7,10 +7,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
 
-SYSCTL_FILE="/etc/sysctl.d/99-ssctl.conf"
-LIMITS_FILE="/etc/security/limits.d/99-ssctl.conf"
-BBR_MODULE_FILE="/etc/modules-load.d/ssctl-bbr.conf"
-JOURNALD_DROPIN_FILE="/etc/systemd/journald.conf.d/99-ssctl.conf"
+SYSCTL_FILE="/etc/sysctl.d/99-singtun.conf"
+LIMITS_FILE="/etc/security/limits.d/99-singtun.conf"
+BBR_MODULE_FILE="/etc/modules-load.d/singtun-bbr.conf"
+JOURNALD_DROPIN_FILE="/etc/systemd/journald.conf.d/99-singtun.conf"
 
 # 尝试启用 BBR 模块；返回 0 表示内核可用 bbr
 ensure_bbr_available() {
@@ -26,7 +26,7 @@ ensure_bbr_available() {
 
 main() {
   require_root
-  acquire_ssctl_lock
+  acquire_singtun_lock
   detect_os >/dev/null
   detect_arch >/dev/null
   load_env
@@ -76,7 +76,7 @@ main() {
   done
 
   {
-    printf '# Managed by ssctl (20-optimize.sh)\n'
+    printf '# Managed by singtun (20-optimize.sh)\n'
     printf '# BBR + fq、文件句柄、UDP/TCP 缓冲区（仅包含本机实际可写入的参数）\n'
     if (( ${#applied[@]} > 0 )); then
       printf '%s\n' "${applied[@]}"
@@ -85,7 +85,7 @@ main() {
 
   mkdir -p /etc/security/limits.d
   cat > "${LIMITS_FILE}" <<'EOF'
-# Managed by ssctl (20-optimize.sh)
+# Managed by singtun (20-optimize.sh)
 * soft nofile 1048576
 * hard nofile 1048576
 root soft nofile 1048576
@@ -94,7 +94,7 @@ EOF
 
   mkdir -p "$(dirname "${JOURNALD_DROPIN_FILE}")"
   cat > "${JOURNALD_DROPIN_FILE}" <<'EOF'
-# Managed by ssctl (20-optimize.sh) — 低配 VPS 日志体积上限与自动过期保护
+# Managed by singtun (20-optimize.sh) — 低配 VPS 日志体积上限与自动过期保护
 [Journal]
 SystemMaxUse=64M
 RuntimeMaxUse=32M

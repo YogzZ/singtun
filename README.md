@@ -1,12 +1,12 @@
-# ssctl — 个人跨境代理一键部署与多端订阅管理工具
+# singtun — 个人跨境代理一键部署与多端订阅管理工具
 
-`ssctl` 是一个面向个人与多设备场景的自建代理服务端部署与订阅管理工具。只需维护一份私有配置文件（`private/.env`），即可在自有海外 VPS 上一键部署基于 **sing-box `VLESS + REALITY + Vision`（配合自有域名真实证书回落）** 的代理服务，并按需为每台设备生成独立的客户端配置与订阅链接。
+`singtun` 是一个面向个人与多设备场景的自建代理服务端部署与订阅管理工具。只需维护一份私有配置文件（`private/.env`），即可在自有海外 VPS 上一键部署基于 **sing-box `VLESS + REALITY + Vision`（配合自有域名真实证书回落）** 的代理服务，并按需为每台设备生成独立的客户端配置与订阅链接。
 
 ### 核心特性
 
 - **单一固定出口，精准国内外分流**：多台设备（macOS、Windows、Linux、iOS）共用同一台 VPS 的固定公网 IPv4 作为国际出口；国内流量与私有网段本地直连，海外流量走代理，不引入任何改变出口 IP 的第三方中转。
 - **开箱即用的客户端防泄漏配置**：每次创建订阅会自动生成通用节点（`v2ray`）、`sing-box`、`mihomo (Clash.Meta)` 与 `Shadowrocket` 四种格式。其中 `sing-box.json` 与 `mihomo.yaml` 已内置虚拟网卡严格路由、国内外加密 DoH、IPv6 旁路阻断与海外 QUIC 自动降级，并自动通知 Apple 设备在代理通道下停用 iCloud 专用代理（防 Safari 卡死）、优先代理 Google / Firebase 核心域名，导入一条链接即可开箱即用且零国内 DNS 暴露。
-- **按设备独立订阅，一键轮换作废**：初始部署支持零预设用户待机；日常通过 `ssctl add` 为每台设备分配独立凭据与 256 位随机订阅链接，一旦怀疑链接外泄，执行 `ssctl reset <name>` 即可同时作废旧节点与旧链接。
+- **按设备独立订阅，一键轮换作废**：初始部署支持零预设用户待机；日常通过 `singtun add` 为每台设备分配独立凭据与 256 位随机订阅链接，一旦怀疑链接外泄，执行 `singtun reset <name>` 即可同时作废旧节点与旧链接。
 - **可选 Hysteria2 备用通道**：支持一键开启基于 QUIC 的 Hysteria2 备用入站（支持 UDP 端口跳跃与 `salamander` 混淆），在晚高峰 TCP 受限或高丢包网络下无缝切换。
 - **轻量、幂等、故障自回滚**：基于原生 Bash 脚本与 `systemd` 构建，无容器或常驻面板开销，1 核 / 512 MB 低配机器即可稳定运行；所有变更先离线校验再原子切换，任一步骤失败自动回滚。
 
@@ -20,38 +20,50 @@
 2. **一个托管在 Cloudflare 的域名**：添加一条 A 记录将子域名（例如 `node.example.com`）指向 VPS 公网 IPv4，且代理状态必须设为 **DNS only（灰色云朵）**。
 3. **Cloudflare API Token**：在 Cloudflare 后台创建一个具备对应域名 `Zone → DNS → Edit` 权限的 API 令牌，用于自动签发和续期 Let's Encrypt 证书（无需开放 80 端口）。
 
-### 1.2 五步完成部署与创建订阅
+### 1.2 一键部署与创建订阅
 
-在 VPS 上依次执行以下命令：
+#### 方式一：一条命令一键引导安装（推荐）
+
+登录海外 VPS 后，只需执行一条命令。脚本会自动安装至 `/opt/singtun`、注册系统命令 `singtun`，并启动交互式配置向导（提示输入域名、自动探测公网 IP、Cloudflare API Token 与邮箱，并实时核验 DNS 解析后一键部署与创建首条订阅）：
 
 ```bash
-# 1. 克隆仓库并初始化私有配置目录（自动生成 REALITY 密钥对、short_id 与高熵订阅路径前缀）
-git clone <repo-url> ss && cd ss
-./ssctl init
+curl -fsSL https://raw.githubusercontent.com/YogzZ/singtun/main/install.sh | sudo bash
+```
 
-# 2. 编辑配置文件，填入服务器 IP、子域名、证书邮箱与 Cloudflare Token
+> 若仅需安装或日后升级代码（自动保留 `private/` 私有配置与证书），可使用：
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/YogzZ/singtun/main/install.sh | sudo bash -s -- --update
+> ```
+
+#### 方式二：手动克隆仓库部署
+
+如需先审核代码或按非交互自动化方式部署，可直接在 VPS 上手动克隆后运行：
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/YogzZ/singtun.git /opt/singtun && cd /opt/singtun
+
+# 2a. 运行交互式配置与部署向导（推荐）
+sudo ./singtun setup
+
+# 或 2b. 纯非交互方式：初始化 -> 手动编辑 -> 离线校验 -> 部署 -> 创建订阅
+./singtun init
 vi private/.env
-
-# 3. 离线渲染并校验服务端与 4 种客户端配置（不改动系统环境）
-./ssctl check
-
-# 4. 一键部署服务端（完成防火墙收敛、BBR 优化、证书签发与服务启动，支持重复执行）
-sudo ./ssctl deploy
-
-# 5. 按设备创建订阅（省略名称则自动编号为 sub-1），立即输出 4 条专属客户端订阅链接
-sudo ./ssctl add iphone
+./singtun check
+sudo ./singtun deploy
+sudo ./singtun add iphone
 ```
 
 如果需要在终端直接用手机扫码导入，可追加 `--qr <类型>` 参数按需渲染单个二维码（支持 `v2ray`、`singbox`、`mihomo`、`sr`、`vless`、`hy2`）：
 
 ```bash
-./ssctl show iphone --qr singbox    # 渲染 sing-box 远程配置二维码（适合全平台官方 sing-box 客户端）
-./ssctl show iphone --qr v2ray      # 渲染通用节点订阅二维码（适合 Shadowrocket / v2rayN）
+./singtun show iphone --qr singbox    # 渲染 sing-box 远程配置二维码（适合全平台官方 sing-box 客户端）
+./singtun show iphone --qr v2ray      # 渲染通用节点订阅二维码（适合 Shadowrocket / v2rayN）
 ```
 
 > [!WARNING]
 > **公网订阅凭据安全提醒**
-> 当 `ENABLE_SUBSCRIPTION=true`（默认）时，生成的 HTTPS 订阅链接本身即包含完整代理凭据。**切勿将订阅链接或二维码截图、公开粘贴或转发他人**。若怀疑链接泄露，请立即执行 `sudo ./ssctl reset <name>` 同时作废旧凭据与旧链接；若追求纯离线使用，可在 `private/.env` 中将 `ENABLE_SUBSCRIPTION` 设为 `false` 并重新运行 `sudo ./ssctl deploy`。
+> 当 `ENABLE_SUBSCRIPTION=true`（默认）时，生成的 HTTPS 订阅链接本身即包含完整代理凭据。**切勿将订阅链接或二维码截图、公开粘贴或转发他人**。若怀疑链接泄露，请立即执行 `sudo ./singtun reset <name>` 同时作废旧凭据与旧链接；若追求纯离线使用，可在 `private/.env` 中将 `ENABLE_SUBSCRIPTION` 设为 `false` 并重新运行 `sudo ./singtun deploy`。
 
 ### 1.3 核心配置项参考（`private/.env`）
 
@@ -66,7 +78,7 @@ sudo ./ssctl add iphone
 | **订阅托管** | `ENABLE_SUBSCRIPTION` | 是否启用公网 HTTPS 订阅托管（默认 `true`；设为 `false` 则仅在本地 `private/out/` 生成配置文件） |
 | | `SUB_PATH_PREFIX` / `SUBSCRIPTIONS` | `init` 自动生成的随机路径前缀 / `add`、`del` 自动维护的订阅列表（无需手改） |
 | **备用协议** | `ENABLE_HY2` / `HY2_PORT` | 是否启用 Hysteria2 备用协议（默认 `false`）/ UDP 监听端口（默认 `8443`） |
-| | `HY2_HOP_PORTS` / `HY2_OBFS` | 可选 UDP 端口跳跃范围（如 `20000-30000`）/ 是否开启 `salamander` 数据包混淆（默认 `false`）；修改后需重新执行 `sudo ./ssctl deploy` |
+| | `HY2_HOP_PORTS` / `HY2_OBFS` | 可选 UDP 端口跳跃范围（如 `20000-30000`）/ 是否开启 `salamander` 数据包混淆（默认 `false`）；修改后需重新执行 `sudo ./singtun deploy` |
 | **网络与日志** | `SERVER_IPV6` / `SERVER_LOG_LEVEL` | 服务端是否启用 IPv6（默认 `false`，强制 `ipv4_only` 防泄漏）/ 服务端日志级别（默认 `warn`） |
 | | `DNS_DIRECT` / `DNS_REMOTE` | 国内域名直连加密 DoH（默认 `223.5.5.5`）/ 海外域名加密 DoH（默认 `1.1.1.1`） |
 | | `RULESET_*` | 三端远程分流规则集地址（默认固定至已验证的上游 40 位不可变 Git Commit SHA） |
@@ -88,7 +100,7 @@ sudo ./ssctl add iphone
 
 部分对网络环境敏感的海外平台（涵盖网页端、桌面客户端与命令行工具）会同时检测**出口 IP、DNS 解析出口所在地、IPv6 旁路以及 WebRTC 本地网卡泄漏**。
 
-本项目生成的 **`[2] sing-box.json`**（及 Clash 系的 `[3] mihomo.yaml`）已在配置文件内部锁定了虚拟网卡严格路由（`strict_route`）、OS TUN 内核路由层（`route_exclude_address` / `route-exclude-address`）与规则层服务器公网 IP/域名双层直连（即使中途开关/重载 TUN 或切到 `Global` 模式也不会把本机 SSH 连接吸入代理隧道而被服务端防回环策略拦截）、海外域名远端加密 DoH 解析、IPv6 彻底阻断、海外 `UDP 443` (QUIC) 本地拦截降级，以及启用 Hysteria2 时的主备自动测速策略组。**全平台统一使用官方 `sing-box` 客户端导入 `[2] sing-box.json`**，即可获得完全一致的界面、同源内核协议兼容性与零手动调参体验：
+本项目生成的 **`[2] sing-box.json`**（及 Clash 系的 `[3] mihomo.yaml`）已在配置文件内部锁定了虚拟网卡严格路由（`strict_route`）、OS TUN 内核路由层（`route_exclude_address` / `route-exclude-address`）与规则层服务器公网 IP/域名双层直连（即使中途开关/重载 TUN 或切到 `Global` 模式也不会把本机 SSH 连接吸入代理隧道而被服务端防回环策略拦截）、海外域名远端加密 DoH 解析、IPv6 彻底阻断、`UDP 123` (NTP) 本地直连、海外 `UDP 443` (QUIC) 本地拦截降级，以及启用 Hysteria2 时的主备自动测速策略组。**全平台统一使用官方 `sing-box` 客户端导入 `[2] sing-box.json`**，即可获得完全一致的界面、同源内核协议兼容性与零手动调参体验：
 
 | 平台 | 推荐级别 | 客户端软件 | 核心优势 | 常驻内存 | 导入的订阅格式 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -103,6 +115,8 @@ sudo ./ssctl add iphone
 | | **首选 B** | **Shadowrocket** | 按需连接成熟省电，需同时导入 `[1]` 节点订阅与 `[4]` 远程规则配置 | < 50 MB | `[1] v2ray` + `[4] shadowrocket.conf` |
 | | 备选 | **Stash** | 兼容 `mihomo` 语法，单条链接导入节点与分流规则 | < 50 MB | `[3] mihomo.yaml` |
 
+> **iOS `sing-box (SFM)` 与 `Shadowrocket` 的选型说明**：`sing-box.json` 与 `mihomo.yaml` 可原生将整份 7 万余条远程 `geosite-cn` 规则集绑定至国内加密 DoH (`223.5.5.5`)，实现国内外域名 DNS 的完全精确分离；而 `Shadowrocket` 受限于自身规则引擎语法（无法为远程 `DOMAIN-SET` 绑定指定 DNS 服务器），`shadowrocket.conf` 通过 `[Host]` 为约 130 个高频基础设施、云 CDN、支付清算与 Apple 国内核心子域指定国内 DoH，其余长尾非 `.cn` 国内域名则先安全经由远端 `#proxy` DoH 解析再按 `DOMAIN-SET` 直连（零明文泄漏，仅冷启动首包多一次代理 DNS RTT）。因此追求全链路零妥协首选 **`sing-box (SFM)`**，看重极简省电与历史习惯则选用 **`Shadowrocket`**。
+
 ---
 
 ### 2.2 各平台接入步骤
@@ -113,8 +127,8 @@ sudo ./ssctl add iphone
 1. **下载安装官方客户端**：
    - **Windows**：参考 [sing-box for Desktop 官方文档](https://sing-box.sagernet.org/clients/desktop/) 下载安装对应架构安装包（如 `SFW-1.14.*-x64.exe`）。*注：首次切换前请先彻底退出电脑上原有的 v2rayN / Clash 等代理软件，避免多张虚拟网卡冲突。*
    - **macOS**：前往 [sing-box for Apple 官方文档](https://sing-box.sagernet.org/clients/apple/) 或 [GitHub Releases](https://github.com/SagerNet/sing-box/releases) 下载 `SFM-1.14.*-universal.dmg`。
-   - **iOS**：在非国区 App Store 搜索安装官方 **sing-box (`SFM`)**（若商店版本低于 `1.14.0`，可在服务端 `private/.env` 中设 `SINGBOX_CLIENT_COMPAT=1.12` 后运行 `sudo ./ssctl flush`）。
-2. **导入远程配置**：打开软件进入 **`Profiles`** → **`New`** → `Type` 选择 **`Remote`**，粘贴 **`[2] sing-box.json`** 订阅 URL 创建配置（或直接点击 `./ssctl show <name>` 输出的 `sing-box://` 深链一键导入）。
+   - **iOS**：在非国区 App Store 搜索安装官方 **sing-box (`SFM`)**（若商店版本低于 `1.14.0`，可在服务端 `private/.env` 中设 `SINGBOX_CLIENT_COMPAT=1.12` 后运行 `sudo ./singtun flush`）。
+2. **导入远程配置**：打开软件进入 **`Profiles`** → **`New`** → `Type` 选择 **`Remote`**，粘贴 **`[2] sing-box.json`** 订阅 URL 创建配置（或直接点击 `./singtun show <name>` 输出的 `sing-box://` 深链一键导入）。
 3. **启动与切节点**：回到 **`Dashboard`** 打开开关即可接管全系统与命令行流量；开启 Hysteria2 时可在 **`Groups`** 页面随时切换 `vless-out`、`hy2-out` 或 `auto`。
 
 #### 2. Linux — 原生 `sing-box` CLI + systemd（服务器/无头环境首选）
@@ -167,7 +181,7 @@ sudo systemctl enable --now sing-box
 | **设置 → 订阅** | 开启「打开时更新」；**关闭「通过代理更新」** | 订阅域名已在规则中设为直连，关闭「通过代理更新」可确保旧节点失效时仍能直连拉取新订阅。 |
 | **设置 → 证书 / 代理共享 / 日志** | 证书解密**关闭**；代理共享**关闭**；日志设为 `warning` 或 `error` | 避免 MITM 证书报错与后台额外耗电。 |
 
-> **提示**：iOS Shadowrocket 在使用 VLESS 节点时，部分应用的非 443 UDP 流量未封装为 XUDP。若遇到语音通话异常或晚高峰运营商对 TCP 限速，可在服务端开启 `ENABLE_HY2=true`，并在客户端一键切换至同源生成的 `*-hy2` 节点。
+> **提示**：系统校时（`UDP 123` NTP）已由三端配置统一本地直连，不会误入代理隧道。对于语音连麦或游戏等**非 443 / 非 123 的应用层 UDP 流量**，iOS Shadowrocket 在使用 VLESS 节点时部分流量可能未封装为 XUDP，若遇到语音通话异常或晚高峰运营商对 TCP 限速，可在服务端开启 `ENABLE_HY2=true` 并切换至同源生成的 `*-hy2` 节点（或直接使用官方 `sing-box SFM`）。
 
 ---
 
@@ -188,52 +202,53 @@ sudo systemctl enable --now sing-box
 
 ## 三、日常运维与故障排查
 
-### 3.1 `ssctl` 命令速查
+### 3.1 `singtun` 命令速查
 
-所有日常操作均通过 `./ssctl <子命令>` 完成（任意子命令均可加 `--help` 或执行 `./ssctl help <子命令>` 查看详细说明与影响范围）：
+所有日常操作均通过 `./singtun <子命令>` 完成（任意子命令均可加 `--help` 或执行 `./singtun help <子命令>` 查看详细说明与影响范围）：
 
 | 分类 | 命令 | 功能说明 |
 | :--- | :--- | :--- |
-| **部署与生命周期** | `./ssctl init` | 初始化 `private/` 目录，自动补全密钥与随机订阅前缀，并安装本地 Git 防泄漏钩子 |
-| | `./ssctl check` | 离线渲染并校验服务端与 4 种客户端配置，不修改系统状态 |
-| | `sudo ./ssctl deploy` | 一键部署或更新服务端（含防火墙、连接限流、BBR、证书与回落站），并同步公网订阅目录 |
-| | `sudo ./ssctl upgrade <version>` | 先暂存候选版本完成配置预检，通过后升级二进制与配置；失败自动回滚版本与配置 |
-| | `sudo ./ssctl uninstall [--purge-cert]` | 卸载服务、配置、Nginx 站点及防火墙/`nftables` 规则（保留 `private/`；加 `--purge-cert` 一并删除证书） |
-| **订阅与客户端管理** | `sudo ./ssctl add [name] [--qr <type>]` | 新增一条订阅（省略名称自动编号 `sub-1`…），同步服务端并输出 4 种订阅链接 |
-| | `./ssctl list` | 查看当前已创建的订阅列表及公网订阅托管开关状态 |
-| | `./ssctl show <name> [--qr <type>]` | 查看指定订阅的 4 条专属链接、一键导入深链或渲染终端二维码 |
-| | `sudo ./ssctl reset <name> [--qr <type>]` | 重置指定订阅的 UUID、Hysteria2 密码与订阅 Token（旧节点与旧链接立即同时作废） |
-| | `sudo ./ssctl del <name>` | 吊销并删除指定订阅，立即断开该凭据连接并清理本地与公网产物 |
-| | `sudo ./ssctl flush [name] [--local-only]` | 重新生成全部或指定订阅的客户端配置并原子同步至公网订阅目录（加 `--local-only` 仅更新本地副本） |
-| **状态、日志与证书** | `sudo ./ssctl status` | 查看 `sing-box`、`nginx` 及防护/跳跃单元运行状态与 TLS 证书剩余天数（低于 20 天自动告警） |
-| | `sudo ./ssctl logs` | 实时跟踪 `sing-box` 与 `nginx` 的 systemd 日志（Nginx 错误日志位于 `/var/log/nginx/error.log`） |
-| | `sudo ./ssctl restart` | 重启 `nginx`、`sing-box` 及已启用的防护/端口跳跃单元并核验活跃状态 |
-| | `sudo ./ssctl renew` | 强制重新签发 TLS 证书并按需重载服务（受 Let's Encrypt 速率限制，日常由定时任务自动续期，无需手跑） |
+| **部署与生命周期** | `sudo ./singtun setup [--config-only]` | 交互式引导配置（自动探测公网 IP、校验 DNS、三档方案选择），写入后一键部署并引导创建首条订阅 |
+| | `./singtun init` | 初始化 `private/` 目录，自动补全密钥、随机前缀与全量默认项，并安装本地 Git 防泄漏钩子 |
+| | `./singtun check` | 离线渲染并校验服务端与 4 种客户端配置，不修改系统状态 |
+| | `sudo ./singtun deploy` | 一键部署或更新服务端（含防火墙、连接限流、BBR、证书与回落站），并同步公网订阅目录 |
+| | `sudo ./singtun upgrade <version>` | 先暂存候选版本完成配置预检，通过后升级二进制与配置；失败自动回滚版本与配置 |
+| | `sudo ./singtun uninstall [--purge-cert]` | 卸载服务、配置、Nginx 站点及防火墙/`nftables` 规则（保留 `private/`；加 `--purge-cert` 一并删除证书） |
+| **订阅与客户端管理** | `sudo ./singtun add [name] [--qr <type>]` | 新增一条订阅（省略名称自动编号 `sub-1`…），同步服务端并输出 4 种订阅链接 |
+| | `./singtun list` | 查看当前已创建的订阅列表及公网订阅托管开关状态 |
+| | `./singtun show <name> [--qr <type>]` | 查看指定订阅的 4 条专属链接、一键导入深链或渲染终端二维码 |
+| | `sudo ./singtun reset <name> [--qr <type>]` | 重置指定订阅的 UUID、Hysteria2 密码与订阅 Token（旧节点与旧链接立即同时作废） |
+| | `sudo ./singtun del <name>` | 吊销并删除指定订阅，立即断开该凭据连接并清理本地与公网产物 |
+| | `sudo ./singtun flush [name] [--local-only]` | 重新生成全部或指定订阅的客户端配置并原子同步至公网订阅目录（加 `--local-only` 仅更新本地副本） |
+| **状态、日志与证书** | `sudo ./singtun status` | 查看 `sing-box`、`nginx` 及防护/跳跃单元运行状态与 TLS 证书剩余天数（低于 20 天自动告警） |
+| | `sudo ./singtun logs` | 实时跟踪 `sing-box` 与 `nginx` 的 systemd 日志（Nginx 错误日志位于 `/var/log/nginx/error.log`） |
+| | `sudo ./singtun restart` | 重启 `nginx`、`sing-box` 及已启用的防护/端口跳跃单元并核验活跃状态 |
+| | `sudo ./singtun renew` | 强制重新签发 TLS 证书并按需重载服务（受 Let's Encrypt 速率限制，日常由定时任务自动续期，无需手跑） |
 
 > 注：执行 `add`、`reset`、`del` 时会快速重启 `sing-box`（约 1 秒），期间在线客户端会短暂重连。
 
 ### 3.2 常见问题排查
 
 - **拉取订阅链接返回 `404` 或超时**
-  运行 `./ssctl list` 确认 `ENABLE_SUBSCRIPTION=true`；再运行 `./ssctl show <name>` 核对是否使用了最新链接（执行过 `reset` 后旧链接会立即失效并返回 `404`）。
+  运行 `./singtun list` 确认 `ENABLE_SUBSCRIPTION=true`；再运行 `./singtun show <name>` 核对是否使用了最新链接（执行过 `reset` 后旧链接会立即失效并返回 `404`）。
 - **SFM 导入 `sing-box.json` 提示配置字段不支持**
-  检查客户端版本是否低于 `1.14.0`（如部分旧版 App Store 客户端）。若是旧版本，在 `private/.env` 中设置 `SINGBOX_CLIENT_COMPAT=1.12` 后运行 `sudo ./ssctl flush` 即可切换为兼容语法。
+  检查客户端版本是否低于 `1.14.0`（如部分旧版 App Store 客户端）。若是旧版本，在 `private/.env` 中设置 `SINGBOX_CLIENT_COMPAT=1.12` 后运行 `sudo ./singtun flush` 即可切换为兼容语法。
 - **客户端首次启动无法下载分流规则集**
-  `sing-box.json` 与 `mihomo.yaml` 已内置“经由代理隧道下载规则集”的机制；`Shadowrocket` 已内置 100+ 条高频国内域名后缀作为本地直连兜底，也可在 `private/.env` 中将 `RULESET_SR_CN_DOMAIN` 替换为可用的镜像地址后执行 `sudo ./ssctl flush`。
+  `sing-box.json` 与 `mihomo.yaml` 已内置“经由代理隧道下载规则集”的机制；`Shadowrocket` 已内置 100+ 条高频国内域名后缀作为本地直连兜底，也可在 `private/.env` 中将 `RULESET_SR_CN_DOMAIN` 替换为可用的镜像地址后执行 `sudo ./singtun flush`。
 - **iOS / macOS Safari 启用代理后网页卡死或 Google 登录/静态资源加载超时**
   新版客户端配置已在三端（`sing-box.json`、`mihomo.yaml`、`shadowrocket.conf`）前置抑制 iCloud 专用代理（Private Relay）探针域名（不影响 iCloud 云盘/相册等正常功能），并将 Google / `.google` / `gstatic` / `googleapis` / Firebase 等易受上游历史直连规则影响的后缀前置走代理与远端加密 DoH。若在更新前曾导入过旧配置，请在客户端内手动刷新订阅/远程配置并重连代理。
 - **客户端连接超时，无法访问海外网站**
-  1. 在 VPS 上运行 `sudo ./ssctl status` 与 `sudo ./ssctl logs` 查看服务是否正常监听；
+  1. 在 VPS 上运行 `sudo ./singtun status` 与 `sudo ./singtun logs` 查看服务是否正常监听；
   2. 检查 Cloudflare 控制台，确认连接子域名的代理状态为 **DNS only（灰色云朵）** 而非橙色云；
   3. 确认 VPS 与客户端设备系统时间准确（服务端 REALITY 限制客户端时钟偏差不超过 `2 分钟`，`deploy` 已在服务端自动启用 NTP）。
 - **如何在排障时查看连接日志，或在稳定期彻底消除客户端 IP 记录？**
-  为保护隐私，服务端默认设置 `SERVER_LOG_LEVEL=warn`（不记录访问的目标域名），并由 `journald` 按 `64 MB` 容量上限与 `7 天` 保留期自动轮转过期。需要注意：在 `warn` 级别下，`sing-box` 仍会以 `ERROR` 级别记录扫描器无效握手以及客户端连接超时关闭（含客户端公网 IP）。若稳定运行期希望彻底避免客户端 IP 落盘，可在 `private/.env` 中设为 `SERVER_LOG_LEVEL=fatal` 并执行 `sudo ./ssctl deploy`；排障时可临时改为 `info` 观察后改回。不建议执行 `journalctl --vacuum-time=1s` 清空全系统审计日志。
+  为保护隐私，服务端默认设置 `SERVER_LOG_LEVEL=warn`（不记录访问的目标域名），并由 `journald` 按 `64 MB` 容量上限与 `7 天` 保留期自动轮转过期。需要注意：在 `warn` 级别下，`sing-box` 仍会以 `ERROR` 级别记录扫描器无效握手以及客户端连接超时关闭（含客户端公网 IP）。若稳定运行期希望彻底避免客户端 IP 落盘，可在 `private/.env` 中设为 `SERVER_LOG_LEVEL=fatal` 并执行 `sudo ./singtun deploy`；排障时可临时改为 `info` 观察后改回。不建议执行 `journalctl --vacuum-time=1s` 清空全系统审计日志。
 - **Nginx 错误日志偶发 `SSL_do_handshake() failed (...bad key share), client: 127.0.0.1` 是故障吗？**
   不是故障。当互联网扫描器向 `443` 端口发送畸形 TLS 1.3 握手包时，`sing-box` REALITY 会按设计将其原样透明回落给本机 `127.0.0.1:8443` 的 Nginx，由 OpenSSL 拒绝握手并记下回环地址，表明抗探测回落工作正常。
 - **VPS 上同时运行了 Docker 容器**
   Docker 使用 `-p 0.0.0.0:端口` 发布容器时会直接操作 `iptables` 绕过 UFW 防火墙。同机运行 Docker 时，请将容器端口绑定在回环地址（如 `-p 127.0.0.1:8080:80`）或自行配置 `DOCKER-USER` 防火墙链。
 - **如何迁移到新 VPS？**
-  在新 VPS 上克隆本仓库，将旧机器的 `private/.env` 复制过来，修改其中的 `SERVER_IP` 并在 Cloudflare 更新 DNS A 记录，然后执行 `sudo ./ssctl deploy` 即可完整恢复所有订阅配置。由于客户端节点直接连接 `SERVER_IP`，订阅 URL 地址本身保持不变，各设备只需手动刷新一次订阅（拉取新 IP）即可恢复连接，无需重新导入或更换链接。
+  在新 VPS 上克隆本仓库，将旧机器的 `private/.env` 复制过来，修改其中的 `SERVER_IP` 并在 Cloudflare 更新 DNS A 记录，然后执行 `sudo ./singtun deploy` 即可完整恢复所有订阅配置。由于客户端节点直接连接 `SERVER_IP`，订阅 URL 地址本身保持不变，各设备只需手动刷新一次订阅（拉取新 IP）即可恢复连接，无需重新导入或更换链接。
 
 ---
 
@@ -249,7 +264,7 @@ sudo systemctl enable --now sing-box
    │  TLS SNI     = 自有子域名（Cloudflare DNS only）
    ├─ 主通道 (TCP 443): VLESS + uTLS (chrome) + REALITY + xtls-rprx-vision
    │     ▼
-   │  nftables (ssctl_guard) ──► 单源 IP 并发与新建 SYN 速率限流，防慢速连接耗尽
+   │  nftables (singtun_guard) ──► 单源 IP 并发与新建 SYN 速率限流，防慢速连接耗尽
    │     ▼
    │  sing-box VLESS inbound (:443)
    │     ├─ REALITY + UUID 双层认证通过 ────────► 固定 IPv4 国际出口（经出站安全路由过滤）
@@ -260,7 +275,7 @@ sudo systemctl enable --now sing-box
    │
    └─ 备用通道 (UDP 8443，可选跳跃端口与 salamander 混淆): Hysteria2 (QUIC)
          ▼
-      sing-box Hysteria2 inbound (:8443，可选 nftables ssctl_hy2 端口跳跃重定向)
+      sing-box Hysteria2 inbound (:8443，可选 nftables singtun_hy2 端口跳跃重定向)
          ├─ 密钥化派生密码认证通过 ────────────► 固定 IPv4 国际出口
          └─ 非法探测 ──────────────────────────► file 模式直接回落至同一静态站点目录
 ```
@@ -270,34 +285,56 @@ sudo systemctl enable --now sing-box
 | **`sing-box`** | 承载 VLESS REALITY Vision 主入站与可选 Hysteria2 入站 | 以非特权用户 `sing-box` 运行，仅授予 `CAP_NET_BIND_SERVICE` 能力并启用严格 `systemd` 沙箱；版本由 `SINGBOX_VERSION` 锁定 |
 | **`Nginx`** | 提供 REALITY 真实 TLS 握手目标、回落静态站点与公网订阅文件托管 | 仅绑定 `127.0.0.1:8443`，不向公网暴露端口；开启 TLS 1.2/1.3 与 HTTP/2，收敛慢连接超时、禁用内部符号链接穿越（`disable_symlinks`），关闭 `access_log` 与目录枚举（Nginx `>= 1.19.4` 自动拒绝未知 SNI 握手） |
 | **`acme.sh`** | 通过 Cloudflare DNS-01 签发并自动续期 Let's Encrypt ECC 证书 | 固定官方 `v3.1.0` 版本并校验 SHA256；续期后仅重载 Nginx（仅在启用 Hysteria2 时同步重启 `sing-box`，避免纯 REALITY 无故断连） |
-| **`UFW` / `nftables` / `NTP`** | 最小化端口暴露面、入口连接限流、实现 UDP 端口跳跃与时钟同步 | UFW 默认拒绝入站并自动保留当前 SSH 端口；`table inet ssctl_guard` 对 VLESS 入口实施单源 IP 并发与新建连接限速防慢速耗尽；Hysteria2 端口跳跃使用独立 `table inet ssctl_hy2` 维护，关闭或卸载时幂等清理 |
+| **`UFW` / `nftables` / `NTP`** | 最小化端口暴露面、入口连接限流、实现 UDP 端口跳跃与时钟同步 | UFW 默认拒绝入站并自动保留当前 SSH 端口；`table inet singtun_guard` 对 VLESS 入口实施单源 IP 并发与新建连接限速防慢速耗尽；Hysteria2 端口跳跃使用独立 `table inet singtun_hy2` 维护，关闭或卸载时幂等清理 |
 
 ### 4.2 协议选型与双向分流设计
 
 1. **为什么采用 `VLESS + REALITY + Vision (Self-steal)` 作为主协议？**
    - 传统 `VLESS + TLS` 存在明显的 TLS-in-TLS 握手特征；引入 `xtls-rprx-vision` 可在内层 TLS 1.3 握手完成后切换直通转发以消除该特征，并在支持的 Linux TCP 路径下启用 `splice` 零拷贝转发。
    - 然而 `sing-box` 的普通 VLESS 入站不支持 `fallback` 回落，面对主动探测时无法返回正常网页。结合 **REALITY** 并将目标指向本机回环 Nginx（持有自有域名真实证书的 HTTPS 静态站），既消除了 TLS-in-TLS 特征，又保证了主动探测者看到的是完整真实的 HTTPS 站点，且 **SNI 域名与服务器 IP 的 DNS 解析完全一致**（无借用第三方大厂域名的特征矛盾）。
-2. **客户端防回环与 QUIC 降级机制**
-   - **防回环**：客户端节点出站 `server` 直接填写服务器 IPv4 地址，同时在三端配置（`sing-box`、`mihomo`、`Shadowrocket`）的 DNS 与路由规则顶部将 `SERVER_DOMAIN` 与 `SERVER_IP/32` 显式设为 `DIRECT`。这保证了无论处于 TUN 全局接管还是 SNI 嗅探覆写下，拉取远程订阅或解析节点域名都绝不会产生死锁回环。
-   - **QUIC 抑制**：客户端在本地直接 `REJECT` 目标为非中国大陆 `UDP 443` 的流量（包括 `Global` 模式），促使浏览器立即从 HTTP/3 回退至 HTTP/2 (TCP)，发挥 Vision 的最佳吞吐性能；而语音、连麦、游戏等非 443 端口的 UDP 流量则正常放行。
+2. **客户端防回环、NTP 直连与 QUIC 降级机制**
+   - **防回环**：客户端节点出站 `server` 直接填写服务器 IPv4 地址，同时在三端配置（`sing-box`、`mihomo`、`Shadowrocket`）的 OS TUN 路由排除表、DNS 与路由规则顶部将 `SERVER_DOMAIN` 与 `SERVER_IP/32`（开启 IPv6 时含 `/128`）显式设为 `DIRECT`。这保证了无论处于 TUN 全局接管还是 SNI 嗅探覆写下，拉取远程订阅、解析节点域名或保持直连 SSH 会话都绝不会产生死锁回环。
+   - **NTP (`UDP 123`) 本地直连**：三端在 `IPv6` 阻断之后、`Global` 模式与海外规则之前统一将 `UDP 123` 设为本地 `DIRECT`（同时在 `mihomo` 的 `fake-ip-filter` 中排除常见 NTP 域名通配）。校时数据包不承载用户访问意图，直连可消除跨境代理带来的 RTT 偏差，也避免部分不支持 XUDP 的客户端将 `UDP 123` 送入 VLESS Vision 触发服务端 `flow mismatch` 拒绝。
+   - **QUIC 抑制**：客户端在本地直接 `REJECT` 目标为非中国大陆 `UDP 443` 的流量（包括 `Global` 模式），促使浏览器立即从 HTTP/3 回退至 HTTP/2 (TCP)，发挥 Vision 的最佳吞吐性能；而语音、连麦、游戏等其余非 443 UDP 流量则随选中节点正常放行。
 3. **服务端出站防滥用与防 SSRF / DNS Rebinding（项目安全策略）**
    - 服务端 `90-route.json` 按严格顺序执行出站过滤：先拦截 `localhost`/`ip6-localhost`/`.local` 域名、`TCP 25`（防止垃圾邮件滥用导致 VPS 被封禁，保留 `465`/`587` 正常加密发信）、SMB/NetBIOS 与常见 BT 追踪器端口（`135`、`137:139`、`445`、`6881:6889`、`6969`）以及 `bittorrent` 协议（防止海外机房版权投诉）；随后对目标域名执行 `action: resolve` 预解析，拦截 `ip_is_private: true` 以及项目安全策略显式拒绝的特殊网段（含 `100.64.0.0/10` CGNAT/云元数据、`169.254.0.0/16`、多播/保留段、IPv6 本地与 `::ffff:0:0/96` 映射段、NAT64 前缀）和 VPS 自身公网 IP，阻断通过伪造域名解析（DNS Rebinding）或字面量拨号探测服务端本机与内网资源的路径。
 
 ### 4.3 工程可靠性与供应链安全
 
-- **本机原地执行与事务级快照回滚**：`ssctl` 直接运行于目标 VPS 本机，`private/.env`（强制 `0600` 权限）是全系统唯一状态源。配置文件由纯数据键值解析器与键名白名单加载更新（不作为 Shell 脚本执行），所有写操作均由 `flock` 文件锁（`private/.ssctl.lock`）串行保护，并在整份校验通过后备份 `.env.bak` 并 `mv` 原子替换。`add`、`reset`、`del` 在变更前自动创建 `.env` 与 `private/out/` 的物理快照，一旦渲染、校验或服务端同步失败，立即无损还原至变更前状态。
-- **零中断订阅发布与一致 `404` 隔离**：客户端订阅每次生成在带时间戳与 PID 的独立版本目录（`/var/lib/ssctl/releases/sub-web.<ts>.<pid>`），校验通过后通过 `mv -Tf` 原子切换 `/var/lib/ssctl/sub-web` 符号链接，确保用户拉取订阅全程无 `404` 窗口。Nginx 隐藏了订阅文件的 `Last-Modified` 时间戳，禁止文档根目录内任何符号链接穿越，并通过 `try_files $uri =404;` 使所有未命中合法 `<SUB_PATH_PREFIX>/<256位Token>/<文件名>` 的猜测或目录请求均返回与根站完全一致的内置 `404` 响应头与字节长度。
+- **本机原地执行与事务级快照回滚**：`singtun` 直接运行于目标 VPS 本机，`private/.env`（强制 `0600` 权限）是全系统唯一状态源。配置文件由纯数据键值解析器与键名白名单加载更新（不作为 Shell 脚本执行），所有写操作均由 `flock` 文件锁（`private/.singtun.lock`）串行保护，并在整份校验通过后备份 `.env.bak` 并 `mv` 原子替换。`add`、`reset`、`del` 在变更前自动创建 `.env` 与 `private/out/` 的物理快照，一旦渲染、校验或服务端同步失败，立即无损还原至变更前状态。
+- **零中断订阅发布与一致 `404` 隔离**：客户端订阅每次生成在带时间戳与 PID 的独立版本目录（`/var/lib/singtun/releases/sub-web.<ts>.<pid>`），校验通过后通过 `mv -Tf` 原子切换 `/var/lib/singtun/sub-web` 符号链接，确保用户拉取订阅全程无 `404` 窗口。Nginx 隐藏了订阅文件的 `Last-Modified` 时间戳，禁止文档根目录内任何符号链接穿越，并通过 `try_files $uri =404;` 使所有未命中合法 `<SUB_PATH_PREFIX>/<256位Token>/<文件名>` 的猜测或目录请求均返回与根站完全一致的内置 `404` 响应头与字节长度。
 - **密钥化多态回落站点与凭据隔离**：若用户未在 `private/www/` 放置自定义网页（严禁包含符号链接），部署脚本会混入实例独有的 `REALITY_PRIVATE_KEY` 与随机路径前缀生成多套异构 HTML 骨架、样式与行业文案的静态页面，消除公开扫描器按域名复算特征的可能；同样地，Hysteria2 节点密码混入服务端实例密钥派生，即使单个客户端 VLESS UUID 外泄也无法离线推导出备用协议密码。
 - **供应链强校验与不可变规则源**：安装 `sing-box` 时对官方 APT GPG 公钥执行单主钥检查、固定指纹（`2C317FBD5D886B4E89BAE8DA6D9152172A2B2F0C`）隔离环境最小化重导出与单块单主钥二次核验；离线安装包、`acme.sh` 与 CI 校验用 `mihomo` 内核均强制比对仓库内固定的 SHA256 校验表，客户端默认远程规则集固定至已核验的 40 位 Git Commit SHA，杜绝上游分支漂移风险。
 
-### 4.4 仓库目录结构与开发协作指引
+### 4.4 设计边界与长期维护原则
+
+为了保证 `singtun` 在长期演进中始终保持清晰、可审阅且易于单人或小团队持续维护，项目确立了明确的架构壁垒与工程边界：
+
+1. **核心定位与差异化壁垒**
+   - **服务端与客户端同源闭环**：区别于只管安装服务端的轻量脚本，也不同于重面板方案，`singtun` 将服务端抗探测加固、防回环/防 SSRF 出站过滤与全平台客户端防泄漏规则视为同一整体同源渲染。
+   - **单文件状态与零常驻开销**：全系统仅依赖 `private/.env` 单一状态源，通过无 `source` 执行风险的纯数据解析器、`flock` 锁、目录快照与公网订阅软链原子切换保证运维可靠性，无常驻 Web 面板、容器或数据库消耗低配 VPS 内存。
+   - **真实回环测试驱动**：从 APT GPG 单主钥指纹校验、二进制 SHA256 到双进程 REALITY 回落与 DNS Rebinding 阻断，核心安全不变量均有离线单测与 GitHub CI 实测守护。
+
+2. **明确不做的事（Non-Goals）**
+   - **不做常驻 Web 管理面板或多租户计费系统**：不引入后台常驻管理进程、可视化图表数据库或复杂的流量配额系统。
+   - **不集成改变出口 IP 的组件**：不接入 WARP、Psiphon、Cloudflare Argo/橙色云或任何多跳中转代理链，严格保证单一固定洁净出口 IP。
+   - **不维护去广告、流媒体解锁或细分分流规则包**：这些规则变化极快且冲突率高，项目仅聚焦「国内直连 / 海外代理 / 私有与协议保护」的最小可用边界。
+   - **不在生成脚本中无边界追逐长尾域名**：不把单个垂直 App 或第三方广告/统计/P2P SDK 域名硬编码进脚本来修补局部体验问题。
+
+3. **规则演进与不可变依赖维护（Pin-and-Bump）**
+   - **机制收敛优先于域名堆砌**：遇到跨协议或共性分流问题时，优先寻找协议、端口或地址段机制一次性解决（例如统一以 `UDP 123 -> DIRECT` 收敛全网 NTP 校时，统一拦截海外 `UDP 443` 抑制 QUIC）。
+   - **内置后缀严格准入**：海外前置后缀仅保留上游 `@cn` 历史误判的 Google/Firebase 等核心基础设施；Shadowrocket 国内 `[Host]` 兜底列表仅准入系统/Apple 核心服务、国家级支付清算、头部公有云 CDN 与国民级定位底座，长尾非 `.cn` 国内域名交由不可变远程 `DOMAIN-SET` 路由。
+   - **上游依赖定期锁定更新**：服务端 `sing-box`、CI 校验用 `mihomo`、`acme.sh` 与三端远程规则集均默认锁定固定版本、SHA256 或 40 位 Git Commit SHA。日常不随上游漂移，仅在定期维护窗口统一核验新版、更新锁定值并经 `./singtun check` 与完整 CI 验证后放行。
+
+### 4.5 仓库目录结构与开发协作指引
 
 ```text
 .
 ├── README.md                  # 使用指南与架构说明（本文档）
 ├── AGENTS.md                  # 面向 AI Agent 的架构契约与既定技术事实基线
 ├── PLAN.md                    # 面向 AI Agent 的阶段进度、待办事项与验收基线
-├── ssctl                      # 统一 CLI 入口（扁平化一级子命令）
+├── singtun                    # 唯一 CLI 入口（扁平化一级子命令，支持软链调用）
+├── install.sh                 # curl 一键引导安装与更新脚本（安装至 /opt/singtun 并软链 singtun）
 ├── examples/                  # 公开配置模板（env.example / host-facts.example.md）
 ├── templates/
 │   ├── server/                # 服务端模板（sing-box 配置片段、Nginx 站点、systemd 单元、多态回落页骨架）
@@ -312,15 +349,15 @@ sudo systemctl enable --now sing-box
 │   ├── 50-gen-clients.sh      # 四端订阅配置生成与符号链接原子发布
 │   └── hooks/                 # 原生 Git 防泄漏钩子（install-hooks.sh / check-private-leak.sh）
 ├── .github/workflows/ci.yml   # 自动化测试流水线
-└── private/                   # 私有实例目录（被 Git 忽略，由 ./ssctl init 创建）
+└── private/                   # 私有实例目录（被 Git 忽略，由 ./singtun init 创建）
 ```
 
 #### 开发者本地调试与提交规范
-1. **启用防泄漏钩子**：首次克隆后运行 `./ssctl init`（或 `bash scripts/hooks/install-hooks.sh`），会自动挂载无需额外依赖的 `pre-commit` 与 `commit-msg` 钩子，防止将 `private/` 中的真实 IP、域名、密钥或本地 `file:///` 绝对路径提交入库。
+1. **启用防泄漏钩子**：首次克隆后运行 `./singtun init`（或 `bash scripts/hooks/install-hooks.sh`），会自动挂载无需额外依赖的 `pre-commit` 与 `commit-msg` 钩子，防止将 `private/` 中的真实 IP、域名、密钥或本地 `file:///` 绝对路径提交入库。
 2. **本地静态检查与离线渲染验证**：修改脚本或模板后，无需 root 权限即可在开发机运行以下全套检查：
    ```bash
-   shellcheck -x ssctl scripts/*.sh scripts/lib/*.sh scripts/hooks/*.sh
-   ./ssctl check
+   shellcheck -x singtun install.sh scripts/*.sh scripts/lib/*.sh scripts/hooks/*.sh
+   ./singtun check
    bash scripts/hooks/check-private-leak.sh
    ```
 3. **与 AI Agent 协作开发**：本项目采用“人类开发者 + AI Agent”持续协作模式。[`AGENTS.md`](AGENTS.md) 凝练记录了所有不可违背的架构契约与底层技术事实，[`PLAN.md`](PLAN.md) 记录了阶段验收基线与待办事项。参与开发或使用 AI 辅助编码时，请以这两份文档作为上下文约束，并在改动用户可见行为时同步更新本 `README.md`。

@@ -4,7 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-MARKER="# Managed by ssctl (install-hooks.sh)"
+MARKER="# Managed by singtun (install-hooks.sh)"
+LEGACY_MARKER="# Managed by ssctl (install-hooks.sh)"
 
 if ! command -v git >/dev/null 2>&1 || ! git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   printf '\033[1;33m[WARN]\033[0m 当前目录不是 Git 工作区，跳过 Git 钩子安装。\n' >&2
@@ -26,7 +27,7 @@ install_single_hook() {
   local new_content
   new_content="$(cat)"
 
-  if [[ -f "${hook_path}" ]] && ! grep -Fq "${MARKER}" "${hook_path}"; then
+  if [[ -f "${hook_path}" ]] && ! grep -Fq "${MARKER}" "${hook_path}" && ! grep -Fq "${LEGACY_MARKER}" "${hook_path}"; then
     printf '\033[1;34m[INFO]\033[0m 检测到已有外部 Git 钩子 (%s)，保留现有配置。\n' "${hook_path}"
     return 0
   fi
@@ -42,7 +43,7 @@ install_single_hook() {
 
 install_single_hook "pre-commit" <<'EOF'
 #!/usr/bin/env bash
-# Managed by ssctl (install-hooks.sh)
+# Managed by singtun (install-hooks.sh)
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -50,7 +51,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 bash "${REPO_ROOT}/scripts/hooks/check-private-leak.sh" --staged
 
 if command -v shellcheck >/dev/null 2>&1; then
-  mapfile -t staged_sh < <(git diff --cached --name-only --diff-filter=ACMR | grep -E '^(ssctl|scripts/.*\.sh)$' || true)
+  mapfile -t staged_sh < <(git diff --cached --name-only --diff-filter=ACMR | grep -E '^(singtun|install\.sh|scripts/.*\.sh)$' || true)
   if (( ${#staged_sh[@]} > 0 )); then
     (cd "${REPO_ROOT}" && shellcheck -x "${staged_sh[@]}")
   fi
@@ -63,7 +64,7 @@ EOF
 
 install_single_hook "commit-msg" <<'EOF'
 #!/usr/bin/env bash
-# Managed by ssctl (install-hooks.sh)
+# Managed by singtun (install-hooks.sh)
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"

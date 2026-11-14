@@ -33,7 +33,7 @@
 | **P3** | 证书签发与按需重载 (`30-cert.sh`) | P1 | ✅ 完成 |
 | **P4** | 服务端部署 (`40-deploy-server.sh`) | P2、P3 | ✅ 完成 |
 | **P5** | 客户端生成与高熵订阅发布 (`50-gen-clients.sh`) | P4 | 🟡 代码与 iOS 真机已完成；待桌面三端真机联调 |
-| **P6** | `ssctl` 统一 CLI 与事务快照管理 | P1–P5 | ✅ 完成 |
+| **P6** | `singtun` 统一 CLI 与事务快照管理 | P1–P5 | ✅ 完成 |
 | **P7** | 开源工程化（文档 / 防泄漏钩子 / CI 矩阵） | P1 起并行 | ✅ 本地全套测试通过（待 `git push` 触发远端 CI） |
 | **P8** | 可选 Hysteria2 备用协议与端口跳跃 | P4、P5 | ✅ 完成 |
 | **P9** | `mihomo.yaml` 生成与官方内核 `-t` 校验 | P5 | ✅ 完成 |
@@ -63,23 +63,23 @@ flowchart LR
 ### P1 公共库与预检 ✅
 - **产出**：`scripts/lib/common.sh`、`scripts/00-preflight.sh`。
 - **事实基线**：
-  - [x] `common.sh`：`EXIT` 级临时目录与隔离 `GNUPGHOME` 自动清理（兼容断链符号链接）；`load_env`、`env_file_has_key`、`env_file_apply_batch` 与 `list_env_file_keys` 统一采用纯数据键值语法与键名白名单（禁止 `source` 执行，校验失败时原文件与 `.env.bak` 零改动），强制收敛 `private/` (`0700`) 与 `.env` (`0600`) 权限及属主；`acquire_ssctl_lock` (`private/.ssctl.lock`) 互斥锁；订阅变量映射、`is_non_public_ipv4`（支持拒绝 RFC 5737）、`derive_reality_public_key`（OpenSSL X25519 PKCS#8 DER 派生）、`detect_active_ssh_ports`（仅在 `ssh.socket` 为 `active`/`enabled` 时读取 `Listen` 并采用 IPv6 安全末段端口提取）、实例密钥化 `derive_hy2_password` (`v2`) 与 `derive_hy2_obfs_password` 派生函数。
-  - [x] `00-preflight.sh`：校验 `debian12|ubuntu2204|ubuntu2404` 与 `amd64|arm64`（支持 `SKIP_OS_CHECK=true`）；校验必填项、非公网 `SERVER_IP` 拒绝（完整预检同步拒绝 RFC 5737）、语义版本、邮箱、`ACME_NOTIFY_HOOK` 防路径穿越、`private/www/` 禁止符号链接穿越、REALITY 密钥格式与公私钥对密码学匹配（`ssctl init` 在仅有合法私钥且公钥为空时自动派生恢复）、uTLS 指纹、`RULESET_*` HTTPS URL 白名单（默认固定 40 位 Commit SHA，可变分支 URL 输出非阻塞告警）、订阅名正则/保留字/后缀唯一性/孤立变量冲突、加密 IP-DoH 白名单（`DNS_DIRECT`: `223.5.5.5|223.6.6.6`；`DNS_REMOTE`: `1.1.1.1|1.0.0.1|8.8.8.8|8.8.4.4|9.9.9.9`）；联网校验 `SERVER_DOMAIN` A 记录匹配 `SERVER_IP` 及真实 RFC 8484 DoH 查询（`HTTP 200` + `RCODE=NOERROR`）；校验代理端口与活跃 SSH 端口冲突、本地端口及 `HY2_HOP_PORTS` UDP 区间监听冲突、Docker 绕过 UFW 警告、Swap 与 NTP 状态。
+  - [x] `common.sh`：`EXIT` 级临时目录与隔离 `GNUPGHOME` 自动清理（兼容断链符号链接）；`load_env`、`env_file_has_key`、`env_file_apply_batch` 与 `list_env_file_keys` 统一采用纯数据键值语法与键名白名单（禁止 `source` 执行，校验失败时原文件与 `.env.bak` 零改动），强制收敛 `private/` (`0700`) 与 `.env` (`0600`) 权限及属主；`acquire_singtun_lock` (`private/.singtun.lock`) 互斥锁；订阅变量映射、`is_non_public_ipv4`（支持拒绝 RFC 5737）、`derive_reality_public_key`（OpenSSL X25519 PKCS#8 DER 派生）、`detect_active_ssh_ports`（仅在 `ssh.socket` 为 `active`/`enabled` 时读取 `Listen` 并采用 IPv6 安全末段端口提取）、实例密钥化 `derive_hy2_password` (`v2`) 与 `derive_hy2_obfs_password` 派生函数。
+  - [x] `00-preflight.sh`：校验 `debian12|ubuntu2204|ubuntu2404` 与 `amd64|arm64`（支持 `SKIP_OS_CHECK=true`）；校验必填项、非公网 `SERVER_IP` 拒绝（完整预检同步拒绝 RFC 5737）、语义版本、邮箱、`ACME_NOTIFY_HOOK` 防路径穿越、`private/www/` 禁止符号链接穿越、REALITY 密钥格式与公私钥对密码学匹配（`singtun init` 在仅有合法私钥且公钥为空时自动派生恢复）、uTLS 指纹、`RULESET_*` HTTPS URL 白名单（默认固定 40 位 Commit SHA，可变分支 URL 输出非阻塞告警）、订阅名正则/保留字/后缀唯一性/孤立变量冲突、加密 IP-DoH 白名单（`DNS_DIRECT`: `223.5.5.5|223.6.6.6`；`DNS_REMOTE`: `1.1.1.1|1.0.0.1|8.8.8.8|8.8.4.4|9.9.9.9`）；联网校验 `SERVER_DOMAIN` A 记录匹配 `SERVER_IP` 及真实 RFC 8484 DoH 查询（`HTTP 200` + `RCODE=NOERROR`）；校验代理端口与活跃 SSH 端口冲突、本地端口及 `HY2_HOP_PORTS` UDP 区间监听冲突、Docker 绕过 UFW 警告、Swap 与 NTP 状态。
 - **验收断言**：缺失/非法配置精准报错退出；`shellcheck -x` 零警告。
 
 ### P2 系统加固与内核优化 ✅
 - **产出**：`scripts/10-harden.sh`、`scripts/20-optimize.sh`。
 - **事实基线**：
-  - [x] `10-harden.sh`：UFW 默认拒绝入站，自动检测并保留宿主当前 SSH 端口（`# ssctl-preserve-ssh`）且在活跃端口集非空时清理已失效的旧 `# ssctl-preserve-ssh` 规则，按 `# ssctl-*` 注释精准维护 `VLESS_PORT/tcp` 与 Hysteria2 UDP 端口及 `nftables` 端口跳跃；通过独立 `table inet ssctl_guard`（`ssctl-vless-guard.service`）对 `VLESS_PORT/tcp` 先执行 `SYN` 速率限制（`120/second burst 240`，`flags dynamic,timeout` `1m` + `update`）`drop` 再执行并发连接 `ct count over 256`（对 `flags dynamic` 集合执行 `add`，由内核 `NFT_EXPR_GC` 在连接归零后自动回收，禁止叠加 `timeout`）`reject with tcp reset`；启用 `chrony` 或 `systemd-timesyncd`。
-  - [x] `20-optimize.sh`：自动加载 `tcp_bbr`，逐项探测并持久化生效的 BBR + `fq`、文件句柄与低配机器 TCP/UDP 缓冲区参数至 `/etc/sysctl.d/99-ssctl.conf`（兼容容器）；配置 `/etc/systemd/journald.conf.d/99-ssctl.conf` 限制日志上限为 `64M` 且保留期不超过 `7day`。
+  - [x] `10-harden.sh`：UFW 默认拒绝入站，自动检测并保留宿主当前 SSH 端口（`# singtun-preserve-ssh`）且在活跃端口集非空时清理已失效的旧 `# singtun-preserve-ssh` 规则，按 `# singtun-*` 注释精准维护 `VLESS_PORT/tcp` 与 Hysteria2 UDP 端口及 `nftables` 端口跳跃；通过独立 `table inet singtun_guard`（`singtun-vless-guard.service`）对 `VLESS_PORT/tcp` 先执行 `SYN` 速率限制（`120/second burst 240`，`flags dynamic,timeout` `1m` + `update`）`drop` 再执行并发连接 `ct count over 256`（对 `flags dynamic` 集合执行 `add`，由内核 `NFT_EXPR_GC` 在连接归零后自动回收，禁止叠加 `timeout`）`reject with tcp reset`；启用 `chrony` 或 `systemd-timesyncd`。
+  - [x] `20-optimize.sh`：自动加载 `tcp_bbr`，逐项探测并持久化生效的 BBR + `fq`、文件句柄与低配机器 TCP/UDP 缓冲区参数至 `/etc/sysctl.d/99-singtun.conf`（兼容容器）；配置 `/etc/systemd/journald.conf.d/99-singtun.conf` 限制日志上限为 `64M` 且保留期不超过 `7day`。
 - **验收断言**：重复执行幂等；SSH 不中断；非预期端口全部收敛。
 
 ### P3 证书签发与按需重载 ✅
-- **产出**：`scripts/30-cert.sh`、`/usr/local/libexec/ssctl-cert-reload`。
+- **产出**：`scripts/30-cert.sh`、`/usr/local/libexec/singtun-cert-reload`。
 - **事实基线**：
   - [x] 固定下载官方 `acme.sh v3.1.0` 并强校验归档 SHA256；以 `CF_API_TOKEN` (`dns_cf`) 签发 `SERVER_DOMAIN` ECC 证书（有效期内精确边界校验 SAN 幂等跳过重签，并通过专用 `acme_account_apply_ops` 原子更新 `${ACME_HOME}/account.conf` 中的 Token 与通知钩子而不触发 `.env` 校验或生成 `.bak`）。
-  - [x] 安装至 `/etc/ssctl/cert/`（`fullchain.pem` / `key.pem`，`root:sing-box 0750/0640`）；续期钩子在 Nginx 已启用时重载 Nginx，仅当存在 `hysteria2` 入站配置时重启 `sing-box`，失败时记录 `daemon.err` 日志并返回非零退出码（`acme.sh 3.1.0` `_installcert` 与 `renewAll` 随之返回 `1`）。
-- **验收断言**：`ssctl status` 准确读取到期天数；续期不中断纯 REALITY 连接。
+  - [x] 安装至 `/etc/singtun/cert/`（`fullchain.pem` / `key.pem`，`root:sing-box 0750/0640`）；续期钩子在 Nginx 已启用时重载 Nginx，仅当存在 `hysteria2` 入站配置时重启 `sing-box`，失败时记录 `daemon.err` 日志并返回非零退出码（`acme.sh 3.1.0` `_installcert` 与 `renewAll` 随之返回 `1`）。
+- **验收断言**：`singtun status` 准确读取到期天数；续期不中断纯 REALITY 连接。
 
 ### P4 服务端部署（REALITY + Vision + Nginx） ✅
 - **产出**：`templates/server/*`、`scripts/40-deploy-server.sh`、`scripts/lib/singbox.sha256`。
@@ -93,13 +93,13 @@ flowchart LR
 ### P5 客户端生成与高熵订阅发布 🟡
 - **产出**：`templates/client/*`、`scripts/50-gen-clients.sh`。
 - **事实基线**：
-  - [x] 每订阅先在隔离临时 staging 目录完成渲染（含非公网 `SERVER_IP` 与 REALITY 密钥对校验；`sing-box.json` 采用语义化 `jq` 选择器与锚点插入；多订阅场景下全部通过 `sing-box check` / `mihomo -t` 校验后再原子替换 `private/out/<name>/`，并在 `EUID=0` 时正确还原 `OUT_ROOT` 属主）下的 `v2ray`（含 `links.txt`）、`sing-box.json`（`stack: mixed`、`clash_mode`、国内加密 DoH `https://${DNS_DIRECT}/dns-query`、私网与 `100.64.0.0/10` 直连、本地 BT 直连、Private Relay 金丝雀 `NXDOMAIN`/`REJECT`、Google/`.google`/Firebase/`recaptcha.net`/`pki.goog`/`ampproject.org`/`android.com` 前置远端解析与 `UDP 443 REJECT`+`PROXY`、海外 `UDP 443` 拦截、`http_clients` 代理下载 `.srs`、兼容 `1.14|1.12`）、`mihomo.yaml`（`find-process-mode: off`、全量加密 IP-DoH、`fake-ip-filter`+`rcode://name_error`+`REJECT` 抑制 Private Relay、Google/Firebase/`recaptcha.net`/`pki.goog`/`ampproject.org`/`android.com` 前置代理，注释零 `Antigravity` 字样）、`shadowrocket.conf`（`[General]` 主/备远端加密 IP-DoH 显式声明 `#proxy` + `dns-direct-fallback-proxy = false` + `[Host]` 国内加密 IP-DoH + `hijack-dns = *:53` + `*.lan` 局域网跳过 + `ENABLE_SUBSCRIPTION=true` 按订阅注入 `update-url` + Private Relay 阻断 + Google/Firebase/`recaptcha.net`/`pki.goog`/`ampproject.org`/`android.com` 前置 `UDP 443 REJECT`+`PROXY` + 100+ 条国内高频后缀、`wechatpay.cn` 及 Apple 国内直连 CDN/系统服务子域同源直连兜底）及 `urls.txt`。
-  - [x] 三端均将出站 `server` 设为 `SERVER_IP`，将 `SERVER_DOMAIN` 与 `SERVER_IP/32`（及 `SERVER_IPV6=true` 本机全局 IPv6 `/128`）在 DNS 与路由中显式设为 `DIRECT` 防回环，并在 OS TUN 内核路由层（`sing-box` `route_exclude_address`、`mihomo` `route-exclude-address`、`Shadowrocket` `tun-excluded-routes` 仅 IPv4 + `skip-proxy`）排除服务端公网自指，同时保留局域网段在 `sing-box`/`mihomo` TUN 内防 `:53` 劫持旁路。
-  - [x] 公网订阅通过 `/var/lib/ssctl/releases/sub-web.<ts>.<pid>` + `mv -Tf /var/lib/ssctl/sub-web` 软链原子发布，提交后保留最近 2 个成功版本目录；`ENABLE_SUBSCRIPTION=false` 提交后移除软链并清空 `releases/`。
+  - [x] 每订阅先在隔离临时 staging 目录完成渲染（含非公网 `SERVER_IP` 与 REALITY 密钥对校验；`sing-box.json` 采用语义化 `jq` 选择器与锚点插入；多订阅场景下全部通过 `sing-box check` / `mihomo -t` 校验后再原子替换 `private/out/<name>/`，并在 `EUID=0` 时正确还原 `OUT_ROOT` 属主）下的 `v2ray`（含 `links.txt`）、`sing-box.json`（`stack: mixed`、`clash_mode`、国内加密 DoH `https://${DNS_DIRECT}/dns-query`、私网与 `100.64.0.0/10` 直连、本地 BT 与 `UDP 123` NTP 直连、Private Relay 金丝雀 `NXDOMAIN`/`REJECT`、Google/`.google`/Firebase/`recaptcha.net`/`pki.goog`/`ampproject.org`/`android.com` 前置远端解析与 `UDP 443 REJECT`+`PROXY`、海外 `UDP 443` 拦截、`http_clients` 代理下载 `.srs`、兼容 `1.14|1.12`）、`mihomo.yaml`（`find-process-mode: off`、全量加密 IP-DoH、`fake-ip-filter` 含 `+.time.apple.com`/`ntp.*.gov`/`+.ntp.org` 与金丝雀、前置 `UDP 123` NTP 直连、`rcode://name_error`+`REJECT` 抑制 Private Relay、Google/Firebase/`recaptcha.net`/`pki.goog`/`ampproject.org`/`android.com` 前置代理，注释零 `Antigravity` 字样）、`shadowrocket.conf`（`[General]` 主/备远端加密 IP-DoH 显式声明 `#proxy` + `dns-direct-fallback-proxy = false` + `[Host]` 国内加密 IP-DoH + `hijack-dns = *:53` + `*.lan` 局域网跳过 + `ENABLE_SUBSCRIPTION=true` 按订阅注入 `update-url` + 前置 `UDP 123` NTP 直连（兼容 `DST-PORT`/`DEST-PORT`）+ Private Relay 阻断 + Google/Firebase/`recaptcha.net`/`pki.goog`/`ampproject.org`/`android.com` 前置 `UDP 443 REJECT`+`PROXY` + 仅限底座准入边界的 `SR_CN_FALLBACK_SUFFIXES`（含微信 `weixin.com`/`weixinbridge.com`、阿里/字节云 `alibabausercontent.com`/`myalicdn.com`/`volces.com`、银联 `95516.com`、高德 `amap.com`/`autonavi.com` 及 Apple 国内核心与 `time.asia.apple.com`）同源直连兜底）及 `urls.txt`。
+  - [x] 三端均将出站 `server` 设为 `SERVER_IP`，将 `SERVER_DOMAIN` 与 `SERVER_IP/32`（及 `SERVER_IPV6=true` 本机全局 IPv6 `/128`）在 DNS 与路由中显式设为 `DIRECT` 防回环，将 `UDP 123`（NTP）统一前置于 `IPv6 REJECT` 之后、`Global`/Private Relay/海外前置规则之前本地 `DIRECT`，并在 OS TUN 内核路由层（`sing-box` `route_exclude_address`、`mihomo` `route-exclude-address`、`Shadowrocket` `tun-excluded-routes` 仅 IPv4 + `skip-proxy`）排除服务端公网自指，同时保留局域网段在 `sing-box`/`mihomo` TUN 内防 `:53` 劫持旁路。
+  - [x] 公网订阅通过 `/var/lib/singtun/releases/sub-web.<ts>.<pid>` + `mv -Tf /var/lib/singtun/sub-web` 软链原子发布，提交后保留最近 2 个成功版本目录；`ENABLE_SUBSCRIPTION=false` 提交后移除软链并清空 `releases/`。
 - **验收断言**：`sing-box check` 与 `mihomo -t` 零报错零警告；iOS 真机已验，待桌面端真机联调（见第 1 节）。
 
-### P6 `ssctl` 统一入口与按需订阅管理 ✅
-- **产出**：`ssctl`。
+### P6 `singtun` 统一入口与按需订阅管理 ✅
+- **产出**：`singtun`。
 - **事实基线**：
   - [x] 实现 `init`、`deploy`、`add`、`list`、`show`、`reset`、`del`、`flush`、`check`、`status`、`logs`、`restart`、`renew`、`upgrade`、`uninstall`、`help [command]` 一级子命令。
   - [x] `add` / `reset` / `del` 具备目录级物理快照与原 `sub-web` 软链直恢复能力（事务期内含关闭订阅分支均延迟删除旧版本目录），无论在渲染校验阶段或软链切换后发生故障，`.env`、`.env.bak`、`private/out/` 与 `sub-web` 均零差异自动恢复；支持 `--qr <type>` 按需渲染单个终端二维码。
@@ -109,13 +109,13 @@ flowchart LR
 - **产出**：[`README.md`](README.md)、[`LICENSE`](LICENSE)、`scripts/hooks/{install-hooks,check-private-leak}.sh`、`.github/workflows/ci.yml`。
 - **事实基线**：
   - [x] `check-private-leak.sh`：复用 `common.sh` 的 `_parse_env_data_line`（及引号后行内 `#` 注释剥离 fallback）并配合 `while IFS= read -r line || [[ -n "${line}" ]]` 覆盖无尾部换行符的末行；通过 `0600` 临时特征文件单次 `grep -Fqf` 扫描 Git 暂存区、提交信息与工作区（零外部依赖且避免进程命令行泄露），拦截 `private/` 文件、`.env` 与 `host-facts.md` 敏感值（含多级上级域名、全局 IPv6、Hysteria2 `v2`/`v1` 派生密码与 `obfs` 密码、Base64 节点密文与 `sub://` 深链密文）及 `file:///` 本地链接。
-  - [x] `ci.yml`：覆盖 ShellCheck、`.env` 纯数据解析器正负向校验、GPG 多钥/错纹测试、安装包篡改测试、REALITY 密钥对匹配与 `ssctl init` 恢复、非公网 `SERVER_IP` 拒绝与 `is_non_public_ipv4` 单测、`detect_active_ssh_ports` mock PATH 单测、`10-harden.sh` nftables 超时/规则顺序/SSH UFW 清理结构断言、`check-private-leak.sh` 引号行内注释与无尾换行末行负向测试、订阅全生命周期与软链切换后故障回滚、候选二进制暂存升级预检（`SSCTL_STAGE_DEB_PATH_OVERRIDE` 断言坏候选版本拦截并回滚）、`SERVER_IPV6=false|true`、`SINGBOX_CLIENT_COMPAT=1.14|1.12`、Hysteria2 端口跳跃与 `HY2_OBFS` 混淆、跨三端策略语义/扩展海外后缀与零 `Antigravity` 断言、密钥化多态伪装站与软链穿越拦截、REALITY + Nginx 六类连接测试及四类分层 SSRF / DNS Rebinding 运行时测试。
+  - [x] `ci.yml`：覆盖 ShellCheck、`.env` 纯数据解析器正负向校验、GPG 多钥/错纹测试、安装包篡改测试、REALITY 密钥对匹配与 `singtun init` 恢复、非公网 `SERVER_IP` 拒绝与 `is_non_public_ipv4` 单测、`detect_active_ssh_ports` mock PATH 单测、`10-harden.sh` nftables 超时/规则顺序/SSH UFW 清理结构断言、`check-private-leak.sh` 引号行内注释与无尾换行末行负向测试、订阅全生命周期与软链切换后故障回滚、候选二进制暂存升级预检（`SINGTUN_STAGE_DEB_PATH_OVERRIDE` 断言坏候选版本拦截并回滚）、`SERVER_IPV6=false|true`、`SINGBOX_CLIENT_COMPAT=1.14|1.12`、Hysteria2 端口跳跃与 `HY2_OBFS` 混淆、跨三端 `UDP 123` NTP 直连与严格顺序断言（`node < ipv6 < ntp < pr/global < gquic < gproxy < cn < quic`）、扩展海外后缀、`Shadowrocket` 新增底座后缀 `[Rule]`/`[Host]` 同源映射与零 `Antigravity` 断言、密钥化多态伪装站与软链穿越拦截、REALITY + Nginx 六类连接测试及四类分层 SSRF / DNS Rebinding 运行时测试。
 - **验收断言**：本地防泄漏钩子与 CI 全流程脚本验证通过。
 
 ### P8 可选 Hysteria2 备用协议 ✅
 - **产出**：`templates/server/singbox/20-inbound-hy2.json`、`10-harden.sh` / `40-deploy-server.sh` / `50-gen-clients.sh` Hysteria2 分支。
 - **事实基线**：
-  - [x] 服务端复用同一证书，`masquerade` 采用 `file` 模式直接复用 `/var/www/ssctl-site`；密码由实例 `REALITY_PRIVATE_KEY` 与订阅 UUID 混入派生（`v2`），支持可选 `HY2_OBFS=true` 注入同源派生的 `salamander` 混淆；`HY2_HOP_PORTS` 通过独立 `table inet ssctl_hy2` 与 `ssctl-hy2-hop.service` 在服务端监听就绪后实现本地 UDP 端口跳跃重定向。
+  - [x] 服务端复用同一证书，`masquerade` 采用 `file` 模式直接复用 `/var/www/singtun-site`；密码由实例 `REALITY_PRIVATE_KEY` 与订阅 UUID 混入派生（`v2`），支持可选 `HY2_OBFS=true` 注入同源派生的 `salamander` 混淆；`HY2_HOP_PORTS` 通过独立 `table inet singtun_hy2` 与 `singtun-hy2-hop.service` 在服务端监听就绪后实现本地 UDP 端口跳跃重定向。
   - [x] 客户端 `sing-box.json`、`mihomo.yaml`、`v2ray` 自动注入 Hysteria2 节点与自动测速策略组（默认主节点仍为 VLESS），支持 `--qr hy2`。
 - **验收断言**：开启/关闭幂等清理防火墙与 `nftables` 表；`reset` 时 Hysteria2 密码同步轮换。
 
@@ -127,9 +127,18 @@ flowchart LR
 - **验收断言**：`mihomo -d <workdir> -t -f mihomo.yaml` 校验通过。
 
 ### P10 运维闭环 (`reset` / `upgrade` / `uninstall`) ✅
-- **产出**：`ssctl` 对应子命令实现。
+- **产出**：`singtun` 对应子命令实现。
 - **事实基线**：
   - [x] `reset <name>`：同时更换 UUID、派生 Hysteria2 密码与 256-bit 订阅 Token，原子更新公网订阅软链并清除旧 Token 目录。
   - [x] `upgrade <version>`：先在临时隔离目录解压候选版本二进制并完成服务端/客户端渲染配置 `sing-box check` 预检，通过后抑制包维护脚本自动重启旧配置并安装更新；失败离线无损回滚配置、软链与二进制版本。
-  - [x] `uninstall [--purge-cert]`：移除服务、配置、Nginx 站点及容量调优片段、sysctl/journald 调优、UFW 代理规则与 `ssctl_guard` / `ssctl_hy2` 表，保留宿主 SSH 与 `private/`（默认保留证书，`--purge-cert` 一并移除证书）。
+  - [x] `uninstall [--purge-cert]`：移除服务、配置、Nginx 站点及容量调优片段、sysctl/journald 调优、UFW 代理规则与 `singtun_guard` / `singtun_hy2` 表，保留宿主 SSH 与 `private/`（默认保留证书，`--purge-cert` 一并移除证书）。
 - **验收断言**：`reset` 后旧 Token 路径立即返回 `404`；`upgrade` 失败可完整回退；`uninstall` 不影响宿主 SSH。
+
+### P11 品牌统一 (`singtun`)、智能默认补全、交互向导 (`setup`) 与引导脚本 (`install.sh`) ✅
+- **产出**：`singtun`、`install.sh`、`scripts/lib/common.sh`（默认项与探测辅助）。
+- **事实基线**：
+  - [x] 全仓 CLI、目录、systemd 单元、nftables 表名、UFW 注释、KDF 盐与文档统一切换为 `singtun`（`check-private-leak.sh` 同时拦截历史 `ssctl` 与新版 `singtun` Hysteria2 派生密码）。
+  - [x] `common.sh`（`apply_default_env_vars`）与 `singtun init` 补齐全部基础项与规则集默认回退，`detect_public_ipv4` 自动探测本机公网 IPv4，`derive_default_acme_email` 按连接域名自动推导合理 `ACME_EMAIL`，`00-preflight.sh` 完整预检拒绝 `@example.com` 等保留示例邮箱。
+  - [x] `singtun setup [--config-only]` 保持 `singtun deploy` 纯非交互不变，提供核心 4 项引导输入、DNS A 记录实时核验（支持重试/跳过继续/修改/退出）、3 档部署方案菜单（标准推荐 / Hysteria2 备用 / 高级自定义）、脱敏确认与部署后首条订阅创建引导。
+  - [x] `install.sh` 支持 `curl | sudo bash` 引导部署至 `/opt/singtun`、软链至 `/usr/local/bin/singtun`、从 `/dev/tty` 拉起 `singtun setup`，并提供 `--install-only` 与 `--update`（保留 `private/`）。
+- **验收断言**：缺失/半成品 `.env` 经 `init` 与 `setup --config-only`（三档方案）均能生成合法配置并一次通过 `singtun check`；`install.sh --install-only` 与 `--update` 保留 `private/` 且软链执行正确。

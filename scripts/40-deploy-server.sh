@@ -8,13 +8,13 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 SERVER_TPL_DIR="${REPO_ROOT}/templates/server"
 SINGBOX_ETC_DIR="/etc/sing-box"
-NGINX_SITE_AVAILABLE="/etc/nginx/sites-available/ssctl-reality.conf"
-NGINX_SITE_ENABLED="/etc/nginx/sites-enabled/ssctl-reality.conf"
-WEB_ROOT="/var/www/ssctl-site"
+NGINX_SITE_AVAILABLE="/etc/nginx/sites-available/singtun-reality.conf"
+NGINX_SITE_ENABLED="/etc/nginx/sites-enabled/singtun-reality.conf"
+WEB_ROOT="/var/www/singtun-site"
 SYSTEMD_OVERRIDE_DIR="/etc/systemd/system/sing-box.service.d"
 # SagerNet 官方 APT 仓库签名公钥主指纹 (Project S <contact@sagernet.org>)
 # 获取方法: gpg --batch --with-colons --show-keys /etc/apt/keyrings/sagernet.asc
-SAGERNET_GPG_FINGERPRINT="${SSCTL_SAGERNET_GPG_FPR_OVERRIDE:-2C317FBD5D886B4E89BAE8DA6D9152172A2B2F0C}"
+SAGERNET_GPG_FINGERPRINT="${SINGTUN_SAGERNET_GPG_FPR_OVERRIDE:-2C317FBD5D886B4E89BAE8DA6D9152172A2B2F0C}"
 
 build_users_json() {
   local lines="" sub uuid
@@ -93,8 +93,8 @@ render_singbox_server_config() {
     require_vars HY2_PORT
     local hy2_users_json cert_dir masq_dir hy2_obfs_enabled="false" hy2_obfs_pass=""
     hy2_users_json="$(build_hy2_users_json)"
-    cert_dir="${SSCTL_CERT_DIR_OVERRIDE:-/etc/ssctl/cert}"
-    masq_dir="${SSCTL_WEB_ROOT_OVERRIDE:-${WEB_ROOT}}"
+    cert_dir="${SINGTUN_CERT_DIR_OVERRIDE:-/etc/singtun/cert}"
+    masq_dir="${SINGTUN_WEB_ROOT_OVERRIDE:-${WEB_ROOT}}"
     if [[ "${HY2_OBFS:-false}" == "true" ]]; then
       hy2_obfs_enabled="true"
       hy2_obfs_pass="$(derive_hy2_obfs_password)"
@@ -145,12 +145,12 @@ render_singbox_server_config() {
 }
 
 nginx_supports_ssl_reject_handshake() {
-  local mode="${SSCTL_NGINX_REJECT_UNKNOWN_SNI:-auto}"
+  local mode="${SINGTUN_NGINX_REJECT_UNKNOWN_SNI:-auto}"
   case "${mode}" in
     true)  return 0 ;;
     false) return 1 ;;
     auto)  ;;
-    *)     die "SSCTL_NGINX_REJECT_UNKNOWN_SNI 必须为 auto、true 或 false: ${mode}" ;;
+    *)     die "SINGTUN_NGINX_REJECT_UNKNOWN_SNI 必须为 auto、true 或 false: ${mode}" ;;
   esac
 
   if ! command -v nginx >/dev/null 2>&1; then
@@ -202,7 +202,7 @@ render_nginx_site_config() {
       die "SUB_PATH_PREFIX 未设置或格式非法: ${SUB_PATH_PREFIX:-}"
     fi
     sub_block="    location ^~ /${SUB_PATH_PREFIX}/ {
-        root /var/lib/ssctl/sub-web;
+        root /var/lib/singtun/sub-web;
         disable_symlinks on from=\$document_root;
         autoindex off;
         access_log off;
@@ -262,7 +262,7 @@ render_fallback_site() {
 
   # 基于实例私有密钥加盐摘要确定性生成多态无特征静态页（外部扫描器无法从域名/SNI 反推预期结构或哈希）
   local digest idx_theme idx_color idx_width idx_font idx_layout idx_pad host_label
-  digest="$(printf '%s:%s:%s:ssctl-site-v2' "${REALITY_PRIVATE_KEY:-}" "${SUB_PATH_PREFIX:-}" "${SERVER_DOMAIN}" | sha256sum | awk '{print $1}')"
+  digest="$(printf '%s:%s:%s:singtun-site-v2' "${REALITY_PRIVATE_KEY:-}" "${SUB_PATH_PREFIX:-}" "${SERVER_DOMAIN}" | sha256sum | awk '{print $1}')"
   idx_theme=$(( 16#${digest:0:2} % 8 ))
   idx_color=$(( 16#${digest:2:2} % 6 ))
   idx_width=$(( 520 + (16#${digest:4:2} % 7) * 36 ))
@@ -527,9 +527,9 @@ stage_singbox_candidate_deb() {
   chmod 700 "${stage_dir}"
 
   local staged_deb="${stage_dir}/sing-box.deb"
-  if [[ -n "${SSCTL_STAGE_DEB_PATH_OVERRIDE:-}" ]]; then
-    [[ -f "${SSCTL_STAGE_DEB_PATH_OVERRIDE}" ]] || die "预设测试 deb 包不存在: ${SSCTL_STAGE_DEB_PATH_OVERRIDE}"
-    cp -f "${SSCTL_STAGE_DEB_PATH_OVERRIDE}" "${staged_deb}"
+  if [[ -n "${SINGTUN_STAGE_DEB_PATH_OVERRIDE:-}" ]]; then
+    [[ -f "${SINGTUN_STAGE_DEB_PATH_OVERRIDE}" ]] || die "预设测试 deb 包不存在: ${SINGTUN_STAGE_DEB_PATH_OVERRIDE}"
+    cp -f "${SINGTUN_STAGE_DEB_PATH_OVERRIDE}" "${staged_deb}"
   else
     local arch_id
     arch_id="$(detect_arch)"
@@ -650,8 +650,8 @@ deploy_nginx() {
   log_info "部署本机 Nginx 回落站点 (127.0.0.1:${REALITY_HANDSHAKE_PORT})..."
 
   # 1. 新站点内容渲染到同一文件系统下的全新暂存目录（严格无符号链接，不跟随软链执行 chmod）
-  local www_new="${WEB_ROOT}.ssctl-new"
-  local www_old="${WEB_ROOT}.ssctl-old"
+  local www_new="${WEB_ROOT}.singtun-new"
+  local www_old="${WEB_ROOT}.singtun-old"
   rm -rf "${www_new}" "${www_old}"
   register_cleanup_path "${www_new}"
   render_fallback_site "${www_new}"
@@ -669,9 +669,9 @@ deploy_nginx() {
 
   local had_site="false" had_main_conf="false" had_tuning_conf="false"
   local nginx_main_conf="/etc/nginx/nginx.conf"
-  local nginx_tuning_conf="/etc/nginx/modules-enabled/99-ssctl-tuning.conf"
+  local nginx_tuning_conf="/etc/nginx/modules-enabled/99-singtun-tuning.conf"
   local nginx_systemd_dir="/etc/systemd/system/nginx.service.d"
-  local nginx_systemd_dropin="${nginx_systemd_dir}/ssctl.conf"
+  local nginx_systemd_dropin="${nginx_systemd_dir}/singtun.conf"
   if [[ -f "${NGINX_SITE_AVAILABLE}" ]]; then
     cp -a "${NGINX_SITE_AVAILABLE}" "${nginx_bak_dir}/site.conf"
     had_site="true"
@@ -687,18 +687,18 @@ deploy_nginx() {
 
   # 3. 提升 Nginx 文件描述符上限与单 worker 并发容量（防止 1C 低配机默认 768 连接池被慢速探测耗尽）
   mkdir -p "${nginx_systemd_dir}"
-  local desired_ng_dropin=$'# Managed by ssctl (40-deploy-server.sh)\n[Service]\nLimitNOFILE=65535'
+  local desired_ng_dropin=$'# Managed by singtun (40-deploy-server.sh)\n[Service]\nLimitNOFILE=65535'
   if [[ ! -f "${nginx_systemd_dropin}" ]] || [[ "$(<"${nginx_systemd_dropin}")" != "${desired_ng_dropin}" ]]; then
     printf '%s\n' "${desired_ng_dropin}" > "${nginx_systemd_dropin}"
     chmod 644 "${nginx_systemd_dropin}"
     systemctl daemon-reload
   fi
   if [[ -d "/etc/nginx/modules-enabled" ]]; then
-    printf '# Managed by ssctl (40-deploy-server.sh)\nworker_rlimit_nofile 65535;\n' > "${nginx_tuning_conf}"
+    printf '# Managed by singtun (40-deploy-server.sh)\nworker_rlimit_nofile 65535;\n' > "${nginx_tuning_conf}"
     chmod 644 "${nginx_tuning_conf}"
   fi
   if [[ -f "${nginx_main_conf}" ]] && grep -Eq '^[[:space:]]*worker_connections[[:space:]]+768;' "${nginx_main_conf}"; then
-    sed -i -E 's/^([[:space:]]*)worker_connections[[:space:]]+768;.*$/\1worker_connections 4096; # ssctl-tuned-from-768/' "${nginx_main_conf}"
+    sed -i -E 's/^([[:space:]]*)worker_connections[[:space:]]+768;.*$/\1worker_connections 4096; # singtun-tuned-from-768/' "${nginx_main_conf}"
   fi
 
   # 4. 安装新配置与站点内容
@@ -951,7 +951,7 @@ main() {
 
   if [[ "${1:-}" == "--sync-singbox-only" ]]; then
     require_root
-    acquire_ssctl_lock
+    acquire_singtun_lock
     require_cmd jq sing-box
     deploy_singbox_and_verify
     log_info "sing-box 入站订阅用户同步完成（已重启 sing-box）。"
@@ -962,7 +962,7 @@ main() {
     local req_ver="${2:-}"
     [[ -n "${req_ver}" ]] || die "用法: $0 --install-singbox-version <version>"
     require_root
-    acquire_ssctl_lock
+    acquire_singtun_lock
     detect_os >/dev/null
     detect_arch >/dev/null
     install_or_switch_singbox_version "${req_ver}"
@@ -972,11 +972,11 @@ main() {
   if [[ "${1:-}" == "--stage-singbox" ]]; then
     local req_ver="${2:-}" stage_dir="${3:-}"
     [[ -n "${req_ver}" && -n "${stage_dir}" ]] || die "用法: $0 --stage-singbox <version> <stage_dir>"
-    if [[ -z "${SSCTL_STAGE_DEB_PATH_OVERRIDE:-}" ]]; then
+    if [[ -z "${SINGTUN_STAGE_DEB_PATH_OVERRIDE:-}" ]]; then
       require_root
       detect_os >/dev/null
     fi
-    acquire_ssctl_lock
+    acquire_singtun_lock
     stage_singbox_candidate_deb "${req_ver}" "${stage_dir}"
     return 0
   fi
@@ -984,7 +984,7 @@ main() {
   if [[ "${1:-}" == "--upgrade-singbox" ]]; then
     local staged_deb="${2:-}"
     require_root
-    acquire_ssctl_lock
+    acquire_singtun_lock
     detect_os >/dev/null
     detect_arch >/dev/null
     ensure_singbox_user
@@ -1005,7 +1005,7 @@ main() {
   fi
 
   require_root
-  acquire_ssctl_lock
+  acquire_singtun_lock
   detect_os >/dev/null
   detect_arch >/dev/null
 

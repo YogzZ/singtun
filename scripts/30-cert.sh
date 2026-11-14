@@ -13,11 +13,11 @@ ACME_VERSION="3.1.0"
 ACME_TARBALL_SHA256="5bc8a72095e16a1a177d1a516728bbd3436abf8060232d5d36b462fce74447aa"
 ACME_HOME="/root/.acme.sh"
 ACME_BIN="${ACME_HOME}/acme.sh"
-CERT_DIR="/etc/ssctl/cert"
+CERT_DIR="/etc/singtun/cert"
 FULLCHAIN_PATH="${CERT_DIR}/fullchain.pem"
 KEY_PATH="${CERT_DIR}/key.pem"
 SERVICE_GROUP="sing-box"
-CERT_RELOAD_HOOK="/usr/local/libexec/ssctl-cert-reload"
+CERT_RELOAD_HOOK="/usr/local/libexec/singtun-cert-reload"
 
 ensure_service_group() {
   if ! getent group "${SERVICE_GROUP}" >/dev/null 2>&1; then
@@ -44,14 +44,14 @@ install_reload_hook() {
   mkdir -p "$(dirname "${CERT_RELOAD_HOOK}")"
   cat > "${CERT_RELOAD_HOOK}" <<EOF
 #!/usr/bin/env bash
-# Managed by ssctl (30-cert.sh) — 证书续期自动重载钩子
+# Managed by singtun (30-cert.sh) — 证书续期自动重载钩子
 set -euo pipefail
 
 log_reload_err() {
   local msg="\$1"
-  printf '[ssctl-cert-reload] ERROR: %s\n' "\${msg}" >&2
+  printf '[singtun-cert-reload] ERROR: %s\n' "\${msg}" >&2
   if command -v logger >/dev/null 2>&1; then
-    logger -t ssctl-cert-reload -p daemon.err "\${msg}" || true
+    logger -t singtun-cert-reload -p daemon.err "\${msg}" || true
   fi
 }
 
@@ -82,7 +82,7 @@ EOF
 run_acme_bin() {
   local bin_path="$1"
   shift
-  # 清理 sudo 透传环境变量并固定 HOME=/root，防止 sudo ./ssctl deploy / renew 被 acme.sh 拒绝
+  # 清理 sudo 透传环境变量并固定 HOME=/root，防止 sudo ./singtun deploy / renew 被 acme.sh 拒绝
   env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND HOME="/root" "${bin_path}" "$@"
 }
 
@@ -284,7 +284,7 @@ main() {
   fi
 
   require_root
-  acquire_ssctl_lock
+  acquire_singtun_lock
   detect_os >/dev/null
   detect_arch >/dev/null
   load_env

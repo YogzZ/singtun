@@ -6,8 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=scripts/lib/common.sh
 source "${REPO_ROOT}/scripts/lib/common.sh"
-PRIVATE_DIR="${SSCTL_PRIVATE_DIR:-${REPO_ROOT}/private}"
-PRIVATE_ENV="${SSCTL_ENV_FILE:-${PRIVATE_DIR}/.env}"
+PRIVATE_DIR="${SINGTUN_PRIVATE_DIR:-${REPO_ROOT}/private}"
+PRIVATE_ENV="${SINGTUN_ENV_FILE:-${PRIVATE_DIR}/.env}"
 PRIVATE_FACTS="${PRIVATE_DIR}/host-facts.md"
 EXAMPLE_ENV="${REPO_ROOT}/examples/env.example"
 EXAMPLE_FACTS="${REPO_ROOT}/examples/host-facts.example.md"
@@ -169,18 +169,20 @@ collect_sensitive_tokens() {
 
     # 无论 UUID_* 与 REALITY_PRIVATE_KEY 在 .env 中的先后顺序如何，统一派生并拦截新旧 Hysteria2 密码与混淆密码
     if [[ -n "${env_reality_priv}" ]] && ! is_placeholder "${env_reality_priv}"; then
-      local hy2_obfs_pass
-      hy2_obfs_pass="$(printf '%s:ssctl-hy2-obfs-v1' "${env_reality_priv}" | sha256sum | awk '{print substr($1, 1, 32)}')"
-      tokens+=("${hy2_obfs_pass}")
+      local hy2_obfs_pass legacy_hy2_obfs_pass
+      hy2_obfs_pass="$(printf '%s:singtun-hy2-obfs-v1' "${env_reality_priv}" | sha256sum | awk '{print substr($1, 1, 32)}')"
+      legacy_hy2_obfs_pass="$(printf '%s:ssctl-hy2-obfs-v1' "${env_reality_priv}" | sha256sum | awk '{print substr($1, 1, 32)}')"
+      tokens+=("${hy2_obfs_pass}" "${legacy_hy2_obfs_pass}")
     fi
     if (( ${#env_uuids[@]} > 0 )); then
-      local u_val hy2_pass_v1 hy2_pass_v2
+      local u_val hy2_pass_v1 hy2_pass_v2 legacy_hy2_pass_v2
       for u_val in "${env_uuids[@]}"; do
         hy2_pass_v1="$(printf '%s:ssctl-hy2-v1' "${u_val}" | sha256sum | awk '{print substr($1, 1, 32)}')"
         tokens+=("${hy2_pass_v1}")
         if [[ -n "${env_reality_priv}" ]] && ! is_placeholder "${env_reality_priv}"; then
-          hy2_pass_v2="$(printf '%s:%s:ssctl-hy2-v2' "${env_reality_priv}" "${u_val}" | sha256sum | awk '{print substr($1, 1, 32)}')"
-          tokens+=("${hy2_pass_v2}")
+          hy2_pass_v2="$(printf '%s:%s:singtun-hy2-v2' "${env_reality_priv}" "${u_val}" | sha256sum | awk '{print substr($1, 1, 32)}')"
+          legacy_hy2_pass_v2="$(printf '%s:%s:ssctl-hy2-v2' "${env_reality_priv}" "${u_val}" | sha256sum | awk '{print substr($1, 1, 32)}')"
+          tokens+=("${hy2_pass_v2}" "${legacy_hy2_pass_v2}")
         fi
       done
     fi

@@ -22,7 +22,7 @@ jobs:
 
       - name: Run ShellCheck
         run: |
-          shellcheck -x ssctl scripts/*.sh scripts/lib/*.sh scripts/hooks/*.sh
+          shellcheck -x singtun install.sh scripts/*.sh scripts/lib/*.sh scripts/hooks/*.sh
 
       - name: Install native git hooks and run private leak check
         run: |
@@ -39,7 +39,7 @@ jobs:
             EF="${TD}/.env"
             cp examples/env.example "${EF}"
             chmod 600 "${EF}"
-            export SSCTL_PRIVATE_DIR="${TD}" SSCTL_ENV_FILE="${EF}"
+            export SINGTUN_PRIVATE_DIR="${TD}" SINGTUN_ENV_FILE="${EF}"
             source scripts/lib/common.sh
 
             # 1. 支持 export 前缀、双引号含 &/; URL、单引号 '\'' 拼接，且 SET 去重规范化、DEL 清除 export 行
@@ -98,7 +98,7 @@ jobs:
           bash scripts/40-deploy-server.sh --export-clean-gpg "${TD}/sagernet.asc" "${TD}/ok.asc"
 
           # 2. 负向断言：指纹不匹配必须拒绝
-          if SSCTL_SAGERNET_GPG_FPR_OVERRIDE="0000000000000000000000000000000000000000" \
+          if SINGTUN_SAGERNET_GPG_FPR_OVERRIDE="0000000000000000000000000000000000000000" \
             bash scripts/40-deploy-server.sh --verify-gpg-only "${TD}/sagernet.asc"; then
             echo "ERROR: mismatched SagerNet GPG fingerprint unexpectedly passed!" >&2
             exit 1
@@ -135,7 +135,7 @@ jobs:
 
       - name: Test OpenSSL REALITY keypair fallback (without sing-box installed)
         run: |
-          SSCTL_PRIVATE_DIR=/tmp/ci-openssl-init ./ssctl init
+          SINGTUN_PRIVATE_DIR=/tmp/ci-openssl-init ./singtun init
           sed -i 's|^CF_API_TOKEN=.*|CF_API_TOKEN=dummy_ci_token_for_validation|' /tmp/ci-openssl-init/.env
 
       - name: Download, verify SHA256, and install pinned sing-box & mihomo
@@ -179,43 +179,43 @@ jobs:
 
       - name: Validate OpenSSL-generated REALITY config (zero subscriptions standby)
         run: |
-          SSCTL_PRIVATE_DIR=/tmp/ci-openssl-init ./ssctl check
+          SINGTUN_PRIVATE_DIR=/tmp/ci-openssl-init ./singtun check
           rm -rf /tmp/ci-openssl-init
 
       - name: Validate full subscription lifecycle, symlink publish, mihomo -t, and leak guards
         run: |
           SUB_WEB="/tmp/ci-sub-web"
-          ./ssctl init
+          ./singtun init
           sed -i 's|^CF_API_TOKEN=.*|CF_API_TOKEN=dummy_ci_token_for_validation|' private/.env
 
           # 0. 帮助命令、保留字与孤立变量冲突拦截测试
-          ./ssctl help >/dev/null
-          ./ssctl help add >/dev/null
-          ./ssctl flush --help >/dev/null
-          if ./ssctl help unknown-cmd; then
+          ./singtun help >/dev/null
+          ./singtun help add >/dev/null
+          ./singtun flush --help >/dev/null
+          if ./singtun help unknown-cmd; then
             echo "ERROR: help for unknown command unexpectedly succeeded!" >&2
             exit 1
           fi
-          if SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./ssctl add reset; then
+          if SINGTUN_ALLOW_NONROOT_SUB=true SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./singtun add reset; then
             echo "ERROR: reserved subscription name 'reset' unexpectedly succeeded!" >&2
             exit 1
           fi
           printf '\nUUID_ORPHAN=11111111-2222-3333-4444-555555555555\n' >> private/.env
-          if SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./ssctl add orphan; then
+          if SINGTUN_ALLOW_NONROOT_SUB=true SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./singtun add orphan; then
             echo "ERROR: orphan UUID collision unexpectedly succeeded!" >&2
             exit 1
           fi
           sed -i '/^UUID_ORPHAN=/d' private/.env
 
           # 1. 创建自动编号订阅 (sub-1) 与命名订阅 (laptop)
-          SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-            ./ssctl add
-          SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-            ./ssctl add laptop --qr v2ray >/dev/null
-          ./ssctl list
-          ./ssctl show laptop >/dev/null
+          SINGTUN_ALLOW_NONROOT_SUB=true SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./singtun add
+          SINGTUN_ALLOW_NONROOT_SUB=true SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./singtun add laptop --qr v2ray >/dev/null
+          ./singtun list
+          ./singtun show laptop >/dev/null
 
           # 2. 防泄漏拦截 SUB_PATH_PREFIX、SUB_TOKEN_* 与 Base64 节点密文负向断言
           PFX="$(awk -F= '/^SUB_PATH_PREFIX=/ {print $2}' private/.env)"
@@ -250,10 +250,10 @@ jobs:
           for ipv6_mode in false true; do
             echo "=== Testing SERVER_IPV6=${ipv6_mode} ==="
             sed -i "s|^SERVER_IPV6=.*|SERVER_IPV6=${ipv6_mode}|" private/.env
-            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir ./ssctl check
-            SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-              SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-              ./ssctl flush
+            SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir ./singtun check
+            SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+              SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+              ./singtun flush
             for cfg in private/out/*/sing-box.json; do
               out="$(sing-box check -c "${cfg}" 2>&1)"
               if echo "${out}" | grep -Eiq '(deprecated|warn)'; then
@@ -266,9 +266,9 @@ jobs:
             done
           done
           sed -i "s|^SERVER_IPV6=.*|SERVER_IPV6=false|" private/.env
-          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-            ./ssctl flush
+          SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./singtun flush
 
           # 4. 校验跨三端策略语义、TUN 内核路由排除服务器自指、加密 IP-DoH、无明文 UDP 53、Private Relay NXDOMAIN/REJECT、Google 前置代理、IPv6 拒绝与海外 QUIC 拦截顺序
           jq -e '.inbounds[0].stack == "mixed"' private/out/laptop/sing-box.json >/dev/null
@@ -305,16 +305,18 @@ jobs:
           jq -e 'any(.route.rules[]; .ip_version == 6 and .action == "reject")' private/out/laptop/sing-box.json >/dev/null
           jq -e '
             (.route.rules | map(.domain == ["node.example.com"] and .outbound == "direct") | index(true)) as $node_idx
+            | (.route.rules | map(.ip_version == 6 and .action == "reject") | index(true)) as $ipv6_idx
+            | (.route.rules | map(.network == "udp" and .port == 123 and .outbound == "direct") | index(true)) as $ntp_idx
             | (.route.rules | map(((.domain // []) | index("mask.icloud.com") != null) and .action == "reject") | index(true)) as $canary_idx
             | (.route.rules | map(.clash_mode // "") | indices("global")[0]) as $global_idx
             | (.route.rules | map(((.domain_suffix // []) | index("gstatic.com") != null) and .network == "udp" and .port == 443 and .action == "reject") | index(true)) as $g_quic_idx
             | (.route.rules | map(((.domain_suffix // []) | index("gstatic.com") != null) and .outbound == "proxy") | index(true)) as $g_proxy_idx
             | (.route.rules | map((.rule_set // []) | index("geosite-cn") != null) | index(true)) as $cn_idx
             | (.route.rules | map(.network == "udp" and .port == 443 and .action == "reject" and ((.clash_mode // "") == "") and ((.domain_suffix // []) | length == 0)) | index(true)) as $quic_idx
-            | ($node_idx != null and $canary_idx != null and $global_idx != null and $g_quic_idx != null and $g_proxy_idx != null and $cn_idx != null and $quic_idx != null)
-            and ((.route.rules | map(.protocol // "") | index("bittorrent")) < $global_idx)
+            | ($node_idx != null and $ipv6_idx != null and $ntp_idx != null and $canary_idx != null and $global_idx != null and $g_quic_idx != null and $g_proxy_idx != null and $cn_idx != null and $quic_idx != null)
+            and ((.route.rules | map(.protocol // "") | index("bittorrent")) < $ntp_idx)
             and any(.route.rules[]; .clash_mode == "global" and .network == "udp" and .port == 443 and .action == "reject")
-            and ($node_idx < $canary_idx and $canary_idx < $global_idx and $global_idx < $g_quic_idx and $g_quic_idx < $g_proxy_idx and $g_proxy_idx < $cn_idx and $cn_idx < $quic_idx)
+            and ($node_idx < $ipv6_idx and $ipv6_idx < $ntp_idx and $ntp_idx < $canary_idx and $canary_idx < $global_idx and $global_idx < $g_quic_idx and $g_quic_idx < $g_proxy_idx and $g_proxy_idx < $cn_idx and $cn_idx < $quic_idx)
             and .route.final == "proxy"
           ' private/out/laptop/sing-box.json >/dev/null
 
@@ -325,6 +327,9 @@ jobs:
           grep -Fxq '  route-exclude-address:' private/out/laptop/mihomo.yaml
           grep -Fxq '    - 203.0.113.10/32' private/out/laptop/mihomo.yaml
           grep -Fxq '    - "+.push.apple.com"' private/out/laptop/mihomo.yaml
+          grep -Fxq '    - "+.time.apple.com"' private/out/laptop/mihomo.yaml
+          grep -Fxq '    - "ntp.*.gov"' private/out/laptop/mihomo.yaml
+          grep -Fxq '    - "+.ntp.org"' private/out/laptop/mihomo.yaml
           grep -Fxq '    - "mask.icloud.com"' private/out/laptop/mihomo.yaml
           grep -Fxq '    "mask.icloud.com": "rcode://name_error"' private/out/laptop/mihomo.yaml
           grep -Fxq '    "+.gstatic.com":' private/out/laptop/mihomo.yaml
@@ -332,6 +337,7 @@ jobs:
           ! grep -Fxq '    - "223.5.5.5"' private/out/laptop/mihomo.yaml
           grep -Fxq '  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve' private/out/laptop/mihomo.yaml
           grep -Fxq '  - IP-CIDR6,::/0,REJECT,no-resolve' private/out/laptop/mihomo.yaml
+          grep -Fxq '  - AND,((NETWORK,UDP),(DST-PORT,123)),DIRECT' private/out/laptop/mihomo.yaml
           grep -Fxq '  - DOMAIN,node.example.com,DIRECT' private/out/laptop/mihomo.yaml
           grep -Fxq '  - IP-CIDR,203.0.113.10/32,DIRECT,no-resolve' private/out/laptop/mihomo.yaml
           ! grep -Fqi 'Antigravity' private/out/laptop/mihomo.yaml
@@ -342,6 +348,8 @@ jobs:
           done
           awk '
             /^[[:space:]]*-[[:space:]]*DOMAIN,node\.example\.com,DIRECT$/ { node=NR }
+            /^[[:space:]]*-[[:space:]]*IP-CIDR6,::\/0,REJECT,no-resolve$/ { ipv6=NR }
+            /^[[:space:]]*-[[:space:]]*AND,\(\(NETWORK,UDP\),\(DST-PORT,123\)\),DIRECT$/ { ntp=NR }
             /^[[:space:]]*-[[:space:]]*DOMAIN,mask\.icloud\.com,REJECT$/ { pr=NR }
             /^[[:space:]]*-[[:space:]]*AND,\(\(NETWORK,UDP\),\(DST-PORT,443\),\(DOMAIN-SUFFIX,gstatic\.com\)\),REJECT$/ { gquic=NR }
             /^[[:space:]]*-[[:space:]]*DOMAIN-SUFFIX,gstatic\.com,PROXY$/ { gproxy=NR }
@@ -350,8 +358,8 @@ jobs:
             /^[[:space:]]*-[[:space:]]*AND,\(\(NETWORK,UDP\),\(DST-PORT,443\)\),REJECT$/ { quic=NR }
             /MATCH,PROXY/ { fin=NR }
             END {
-              if (!node || !pr || !gquic || !gproxy || !site || !cn || !quic || !fin) exit 1
-              if (!(node < pr && pr < gquic && gquic < gproxy && gproxy < site && site < cn && cn < quic && quic < fin)) exit 1
+              if (!node || !ipv6 || !ntp || !pr || !gquic || !gproxy || !site || !cn || !quic || !fin) exit 1
+              if (!(node < ipv6 && ipv6 < ntp && ntp < pr && pr < gquic && gquic < gproxy && gproxy < site && site < cn && cn < quic && quic < fin)) exit 1
             }
           ' private/out/laptop/mihomo.yaml
 
@@ -366,20 +374,30 @@ jobs:
           grep -Fxq "update-url = https://node.example.com/${PFX}/${TOK_OLD}/shadowrocket.conf" private/out/laptop/shadowrocket.conf
           grep -Fxq 'IP-CIDR,100.64.0.0/10,DIRECT,no-resolve' private/out/laptop/shadowrocket.conf
           grep -Fxq 'IP-CIDR6,::/0,REJECT,no-resolve' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'AND,((PROTOCOL,UDP),(DST-PORT,123)),DIRECT' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'AND,((PROTOCOL,UDP),(DEST-PORT,123)),DIRECT' private/out/laptop/shadowrocket.conf
           grep -Fxq 'DOMAIN,node.example.com,DIRECT' private/out/laptop/shadowrocket.conf
           grep -Fxq 'IP-CIDR,203.0.113.10/32,DIRECT,no-resolve' private/out/laptop/shadowrocket.conf
           grep -Fxq 'DOMAIN-SUFFIX,weather-data.apple.com,DIRECT' private/out/laptop/shadowrocket.conf
           grep -Fxq 'DOMAIN-SUFFIX,weatherkit.apple.com,DIRECT' private/out/laptop/shadowrocket.conf
           grep -Fxq 'DOMAIN-SUFFIX,time.apple.com,DIRECT' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'DOMAIN-SUFFIX,time.asia.apple.com,DIRECT' private/out/laptop/shadowrocket.conf
           grep -Fxq 'DOMAIN-SUFFIX,pancake.apple.com,DIRECT' private/out/laptop/shadowrocket.conf
           grep -Fxq 'DOMAIN-SUFFIX,swallow.apple.com,DIRECT' private/out/laptop/shadowrocket.conf
           grep -Fxq 'DOMAIN-SUFFIX,iphone-ld.apple.com,DIRECT' private/out/laptop/shadowrocket.conf
           grep -Fxq 'DOMAIN-SUFFIX,wechatpay.cn,DIRECT' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'DOMAIN-SUFFIX,weixinbridge.com,DIRECT' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'DOMAIN-SUFFIX,volces.com,DIRECT' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'DOMAIN-SUFFIX,95516.com,DIRECT' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'DOMAIN-SUFFIX,amap.com,DIRECT' private/out/laptop/shadowrocket.conf
           grep -Fxq 'baidu.com = server:https://223.5.5.5/dns-query' private/out/laptop/shadowrocket.conf
           grep -Fxq 'weather-data.apple.com = server:https://223.5.5.5/dns-query' private/out/laptop/shadowrocket.conf
           grep -Fxq 'weatherkit.apple.com = server:https://223.5.5.5/dns-query' private/out/laptop/shadowrocket.conf
           grep -Fxq 'time.apple.com = server:https://223.5.5.5/dns-query' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'time.asia.apple.com = server:https://223.5.5.5/dns-query' private/out/laptop/shadowrocket.conf
           grep -Fxq 'pancake.apple.com = server:https://223.5.5.5/dns-query' private/out/laptop/shadowrocket.conf
+          grep -Fxq 'weixinbridge.com = server:https://223.5.5.5/dns-query' private/out/laptop/shadowrocket.conf
+          grep -Fxq '*.volces.com = server:https://223.5.5.5/dns-query' private/out/laptop/shadowrocket.conf
           grep -Fxq 'DOMAIN-SUFFIX,mzstatic.com,DIRECT' private/out/laptop/shadowrocket.conf
           grep -Fxq '*.mzstatic.com = server:https://223.5.5.5/dns-query' private/out/laptop/shadowrocket.conf
           ! grep -Eq 'server:[0-9]' private/out/laptop/shadowrocket.conf
@@ -390,6 +408,9 @@ jobs:
           done
           awk '
             /^DOMAIN,node\.example\.com,DIRECT$/ { node=NR }
+            /^IP-CIDR6,::\/0,REJECT,no-resolve$/ { ipv6=NR }
+            /^AND,\(\(PROTOCOL,UDP\),\(DST-PORT,123\)\),DIRECT$/ { ntp=NR }
+            /^AND,\(\(PROTOCOL,UDP\),\(DEST-PORT,123\)\),DIRECT$/ { ntp_dest=NR }
             /^DOMAIN,mask\.icloud\.com,REJECT$/ { pr=NR }
             /^AND,\(\(PROTOCOL,UDP\),\(DST-PORT,443\),\(DOMAIN-SUFFIX,gstatic\.com\)\),REJECT$/ { gquic=NR }
             /^DOMAIN-SUFFIX,gstatic\.com,PROXY$/ { gproxy=NR }
@@ -399,16 +420,16 @@ jobs:
             /^PROTOCOL,QUIC,REJECT$/ { seen_quic=NR }
             /^FINAL,PROXY,dns-failed$/ { seen_final=NR }
             END {
-              if (!node || !pr || !gquic || !gproxy || !seen_suffix || !seen_set || !seen_geoip || !seen_quic || !seen_final) exit 1
-              if (!(node < pr && pr < gquic && gquic < gproxy && gproxy < seen_suffix && seen_suffix < seen_set && seen_set < seen_geoip && seen_geoip < seen_quic && seen_quic < seen_final)) exit 1
+              if (!node || !ipv6 || !ntp || !ntp_dest || !pr || !gquic || !gproxy || !seen_suffix || !seen_set || !seen_geoip || !seen_quic || !seen_final) exit 1
+              if (!(node < ipv6 && ipv6 < ntp && ntp < ntp_dest && ntp_dest < pr && pr < gquic && gquic < gproxy && gproxy < seen_suffix && seen_suffix < seen_set && seen_set < seen_geoip && seen_geoip < seen_quic && seen_quic < seen_final)) exit 1
             }
           ' private/out/laptop/shadowrocket.conf
 
           # 4.1 验证 SERVER_IPV6=true 时三端同步注入本机全局 IPv6 /128 排除（Shadowrocket tun-excluded-routes 仅保留 IPv4）
           sed -i 's|^SERVER_IPV6=.*|SERVER_IPV6=true|' private/.env
-          SSCTL_SELF_IPV6_OVERRIDE="2001:db8::10" SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-            ./ssctl flush
+          SINGTUN_SELF_IPV6_OVERRIDE="2001:db8::10" SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./singtun flush
           jq -e '.inbounds[0].route_exclude_address == ["203.0.113.10/32", "2001:db8::10/128"]' private/out/laptop/sing-box.json >/dev/null
           jq -e 'any(.route.rules[]; .ip_cidr == ["203.0.113.10/32", "2001:db8::10/128"] and .outbound == "direct")' private/out/laptop/sing-box.json >/dev/null
           /tmp/mihomo-bin -d /tmp/mihomo-workdir -t -f private/out/laptop/mihomo.yaml
@@ -417,36 +438,36 @@ jobs:
           grep -Fxq 'IP-CIDR6,2001:db8::10/128,DIRECT,no-resolve' private/out/laptop/shadowrocket.conf
           ! grep '^tun-excluded-routes' private/out/laptop/shadowrocket.conf | grep -Fq '2001:db8::10'
           sed -i 's|^SERVER_IPV6=.*|SERVER_IPV6=false|' private/.env
-          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-            ./ssctl flush
+          SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./singtun flush
 
           # 4.2 校验 IP-DoH 静态白名单拦截与 HY2_HOP_PORTS 本地 UDP 监听冲突拦截
           sed -i 's|^DNS_DIRECT=.*|DNS_DIRECT=114.114.114.114|' private/.env
-          if ./ssctl check 2>/dev/null; then
+          if ./singtun check 2>/dev/null; then
             echo "ERROR: non-whitelisted DNS_DIRECT unexpectedly passed!" >&2
             exit 1
           fi
           sed -i 's|^DNS_DIRECT=.*|DNS_DIRECT=223.5.5.5|' private/.env
           sed -i 's|^DNS_REMOTE=.*|DNS_REMOTE=208.67.222.222|' private/.env
-          if ./ssctl check 2>/dev/null; then
+          if ./singtun check 2>/dev/null; then
             echo "ERROR: non-whitelisted DNS_REMOTE unexpectedly passed!" >&2
             exit 1
           fi
           sed -i 's|^DNS_REMOTE=.*|DNS_REMOTE=1.1.1.1|' private/.env
           sed -i 's|^RULESET_GEOSITE_CN=.*|RULESET_GEOSITE_CN=http://example.com/geosite-cn.srs|' private/.env
-          if ./ssctl check 2>/dev/null; then
+          if ./singtun check 2>/dev/null; then
             echo "ERROR: non-HTTPS RULESET_GEOSITE_CN unexpectedly passed!" >&2
             exit 1
           fi
           sed -i 's|^RULESET_GEOSITE_CN=.*|RULESET_GEOSITE_CN=https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs|' private/.env
-          MUTABLE_WARN_OUT="$(./ssctl check 2>&1)"
+          MUTABLE_WARN_OUT="$(./singtun check 2>&1)"
           grep -Fq "RULESET_GEOSITE_CN" <<< "${MUTABLE_WARN_OUT}"
           sed -i 's|^RULESET_GEOSITE_CN=.*|RULESET_GEOSITE_CN=https://raw.githubusercontent.com/SagerNet/sing-geosite/23066e3b0833d1484916637dde2b5bae80178045/geosite-cn.srs|' private/.env
-          IMMUTABLE_OUT="$(./ssctl check 2>&1)"
+          IMMUTABLE_OUT="$(./singtun check 2>&1)"
           ! grep -Fq "RULESET_" <<< "${IMMUTABLE_OUT}"
           sed -i 's|^ACME_NOTIFY_HOOK=.*|ACME_NOTIFY_HOOK=../evil|' private/.env
-          if ./ssctl check 2>/dev/null; then
+          if ./singtun check 2>/dev/null; then
             echo "ERROR: path-traversal ACME_NOTIFY_HOOK unexpectedly passed!" >&2
             exit 1
           fi
@@ -463,10 +484,10 @@ jobs:
               shutil.copyfile("private/.env", ef)
               os.chmod(ef, 0o600)
               env = os.environ.copy()
-              env.update({"SSCTL_PRIVATE_DIR": td, "SSCTL_ENV_FILE": ef, "SKIP_OS_CHECK": "true", "SKIP_DNS_CHECK": "true"})
+              env.update({"SINGTUN_PRIVATE_DIR": td, "SINGTUN_ENV_FILE": ef, "SKIP_OS_CHECK": "true", "SKIP_DNS_CHECK": "true"})
               subprocess.check_call([
                   "bash", "-c",
-                  'source scripts/lib/common.sh && env_file_apply_batch "$SSCTL_ENV_FILE" '
+                  'source scripts/lib/common.sh && env_file_apply_batch "$SINGTUN_ENV_FILE" '
                   f'"SET:ENABLE_HY2=true" "SET:HY2_PORT=8443" "SET:HY2_HOP_PORTS={max(1,uport-5)}-{min(65535,uport+5)}"'
               ], env=env)
               rc = subprocess.call(["bash", "scripts/00-preflight.sh"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -476,21 +497,21 @@ jobs:
               shutil.rmtree(td, ignore_errors=True)
           PY
 
-          if ./ssctl flush --invalid-flag; then
+          if ./singtun flush --invalid-flag; then
             echo "ERROR: flush with unknown flag unexpectedly succeeded!" >&2
             exit 1
           fi
-          if ./ssctl flush sub-1 laptop; then
+          if ./singtun flush sub-1 laptop; then
             echo "ERROR: flush with extra positional arg unexpectedly succeeded!" >&2
             exit 1
           fi
           rm -f private/out/sub-1/sing-box.json
-          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-            ./ssctl flush laptop
+          SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./singtun flush laptop
           test -f private/out/sub-1/sing-box.json
 
-          # 4.5 校验订阅事务回滚（覆盖渲染失败、软链切换后故障注入 SSCTL_FAIL_AFTER_SUB_WEB_SWITCH=true 及关闭订阅分支保护）
+          # 4.5 校验订阅事务回滚（覆盖渲染失败、软链切换后故障注入 SINGTUN_FAIL_AFTER_SUB_WEB_SWITCH=true 及关闭订阅分支保护）
           SNAP_VERIFY="$(mktemp -d)"
           cp -a private/.env "${SNAP_VERIFY}/env"
           cp -a private/.env.bak "${SNAP_VERIFY}/env.bak"
@@ -499,9 +520,9 @@ jobs:
           for bad_cmd in "add fail-sub" "reset laptop" "del laptop"; do
             # (a) 渲染校验失败回滚
             # shellcheck disable=SC2086
-            if SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-              SSCTL_MIHOMO_BIN=/bin/false SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-              ./ssctl ${bad_cmd}; then
+            if SINGTUN_ALLOW_NONROOT_SUB=true SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+              SINGTUN_MIHOMO_BIN=/bin/false SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+              ./singtun ${bad_cmd}; then
               echo "ERROR: '${bad_cmd}' unexpectedly succeeded under injected mihomo failure!" >&2
               exit 1
             fi
@@ -512,10 +533,10 @@ jobs:
 
             # (b) 软链原子切换后故障注入回滚（验证直接切回原发布目录且无断链）
             # shellcheck disable=SC2086
-            if SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-              SSCTL_FAIL_AFTER_SUB_WEB_SWITCH=true \
-              SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-              ./ssctl ${bad_cmd}; then
+            if SINGTUN_ALLOW_NONROOT_SUB=true SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+              SINGTUN_FAIL_AFTER_SUB_WEB_SWITCH=true \
+              SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+              ./singtun ${bad_cmd}; then
               echo "ERROR: '${bad_cmd}' unexpectedly succeeded under post-switch failure!" >&2
               exit 1
             fi
@@ -528,11 +549,11 @@ jobs:
 
           # (c) ENABLE_SUBSCRIPTION=false 分支：事务期移除软链后触发故障，断言旧版本目录未被提前删除且原软链完整恢复不断链
           sed -i 's|^ENABLE_SUBSCRIPTION=.*|ENABLE_SUBSCRIPTION=false|' private/.env
-          if SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-            SSCTL_FAIL_AFTER_SUB_SYNC=true \
-            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-            ./ssctl add fail-off; then
-            echo "ERROR: 'add fail-off' unexpectedly succeeded under SSCTL_FAIL_AFTER_SUB_SYNC!" >&2
+          if SINGTUN_ALLOW_NONROOT_SUB=true SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SINGTUN_FAIL_AFTER_SUB_SYNC=true \
+            SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./singtun add fail-off; then
+            echo "ERROR: 'add fail-off' unexpectedly succeeded under SINGTUN_FAIL_AFTER_SUB_SYNC!" >&2
             exit 1
           fi
           sed -i 's|^ENABLE_SUBSCRIPTION=.*|ENABLE_SUBSCRIPTION=true|' private/.env
@@ -544,7 +565,7 @@ jobs:
           chmod 600 private/.env private/.env.bak
           rm -rf "${SNAP_VERIFY}"
 
-          # 4.6 校验 ssctl upgrade 先暂存候选二进制预检（坏候选版本在替换运行中二进制前即被拦截并回滚）
+          # 4.6 校验 singtun upgrade 先暂存候选二进制预检（坏候选版本在替换运行中二进制前即被拦截并回滚）
           FAKE_DEB_DIR="$(mktemp -d)"
           mkdir -p "${FAKE_DEB_DIR}/pkg/DEBIAN" "${FAKE_DEB_DIR}/pkg/usr/bin"
           chmod 755 "${FAKE_DEB_DIR}" "${FAKE_DEB_DIR}/pkg" "${FAKE_DEB_DIR}/pkg/DEBIAN" "${FAKE_DEB_DIR}/pkg/usr/bin"
@@ -575,9 +596,9 @@ jobs:
           sed -i "s|^SINGBOX_DEB_SHA256_AMD64=.*|SINGBOX_DEB_SHA256_AMD64=${FAKE_SHA}|" private/.env
           cp -a private/.env "${FAKE_DEB_DIR}/pre_upgrade_env"
           cp -a private/.env.bak "${FAKE_DEB_DIR}/pre_upgrade_env.bak"
-          if UPG_OUT="$(SSCTL_ALLOW_NONROOT_UPGRADE_TEST=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-            SSCTL_STAGE_DEB_PATH_OVERRIDE="${FAKE_DEB_DIR}/sing-box_99.0.0_linux_amd64.deb" \
-            ./ssctl upgrade 99.0.0 2>&1)"; then
+          if UPG_OUT="$(SINGTUN_ALLOW_NONROOT_UPGRADE_TEST=true SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SINGTUN_STAGE_DEB_PATH_OVERRIDE="${FAKE_DEB_DIR}/sing-box_99.0.0_linux_amd64.deb" \
+            ./singtun upgrade 99.0.0 2>&1)"; then
             echo "ERROR: upgrade to incompatible candidate 99.0.0 unexpectedly succeeded!" >&2
             exit 1
           fi
@@ -591,7 +612,7 @@ jobs:
           # 5. 校验符号链接发布、版本保留上限 (<=2) 与 reset 同时更换 UUID + Token 且清除旧 Token 路径
           test -L "${SUB_WEB}/sub-web"
           test -f "${SUB_WEB}/sub-web/${PFX}/${TOK_OLD}/mihomo.yaml"
-          SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./ssctl reset laptop >/dev/null
+          SINGTUN_ALLOW_NONROOT_SUB=true SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./singtun reset laptop >/dev/null
           TOK_NEW="$(awk -F= '/^SUB_TOKEN_LAPTOP=/ {print $2}' private/.env)"
           UUID_NEW="$(awk -F= '/^UUID_LAPTOP=/ {print $2}' private/.env)"
           test "${TOK_NEW}" != "${TOK_OLD}"
@@ -604,10 +625,10 @@ jobs:
           # 5.5 校验 Hysteria2 开关（含单端口、HY2_HOP_PORTS 端口跳跃、v2 实例密钥混入派生密码、HY2_OBFS salamander 混淆、mihomo -t、双节点 Base64 与 reset 同步轮换）
           sed -i 's|^ENABLE_HY2=.*|ENABLE_HY2=true|' private/.env
           sed -i 's|^HY2_HOP_PORTS=.*|HY2_HOP_PORTS=20000-30000|' private/.env
-          SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir ./ssctl check
-          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-            ./ssctl flush
+          SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir ./singtun check
+          SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./singtun flush
           jq -e '.outbounds[0].tag == "proxy" and .outbounds[0].default == "vless-out" and .outbounds[3].type == "hysteria2" and .outbounds[3].server_ports == ["20000:30000"] and (.outbounds[3] | has("obfs") | not)' private/out/laptop/sing-box.json >/dev/null
           /tmp/mihomo-bin -d /tmp/mihomo-workdir -t -f private/out/laptop/mihomo.yaml
           HY2_PASS_BEFORE="$(jq -r '.outbounds[3].password' private/out/laptop/sing-box.json)"
@@ -625,10 +646,10 @@ jobs:
           done
           # 验证开启 HY2_OBFS=true（服务端 20-inbound-hy2.json + 三端客户端 + check-private-leak 拦截 obfs 密码）
           sed -i 's|^HY2_OBFS=.*|HY2_OBFS=true|' private/.env
-          SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir ./ssctl check
-          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-            ./ssctl flush
+          SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir ./singtun check
+          SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./singtun flush
           jq -e '.outbounds[3].obfs.type == "salamander" and (.outbounds[3].obfs.password | length == 32)' private/out/laptop/sing-box.json >/dev/null
           grep -Fxq '    obfs: salamander' private/out/laptop/mihomo.yaml
           /tmp/mihomo-bin -d /tmp/mihomo-workdir -t -f private/out/laptop/mihomo.yaml
@@ -639,7 +660,7 @@ jobs:
           openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
             -keyout "${HY2_SRV_OUT}/cert/key.pem" -out "${HY2_SRV_OUT}/cert/fullchain.pem" \
             -days 1 -nodes -subj "/CN=node.example.com" >/dev/null 2>&1
-          SSCTL_CERT_DIR_OVERRIDE="${HY2_SRV_OUT}/cert" SSCTL_WEB_ROOT_OVERRIDE="${HY2_SRV_OUT}/www" \
+          SINGTUN_CERT_DIR_OVERRIDE="${HY2_SRV_OUT}/cert" SINGTUN_WEB_ROOT_OVERRIDE="${HY2_SRV_OUT}/www" \
             bash scripts/40-deploy-server.sh --render-only "${HY2_SRV_OUT}" >/dev/null
           jq -e ".inbounds[0].obfs.type == \"salamander\" and .inbounds[0].obfs.password == \"${HY2_OBFS_PASS}\"" "${HY2_SRV_OUT}/singbox/20-inbound-hy2.json" >/dev/null
           sing-box check -C "${HY2_SRV_OUT}/singbox"
@@ -652,20 +673,20 @@ jobs:
           fi
           rm -f "${MSG_OBFS_LEAK}"
           sed -i 's|^HY2_OBFS=.*|HY2_OBFS=false|' private/.env
-          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-            ./ssctl flush
+          SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./singtun flush
           sed -i 's|^HY2_UP_MBPS=.*|HY2_UP_MBPS=100|' private/.env
-          if ./ssctl flush --local-only; then
+          if ./singtun flush --local-only; then
             echo "ERROR: unpaired HY2_UP_MBPS unexpectedly succeeded in flush!" >&2
             exit 1
           fi
           sed -i 's|^HY2_UP_MBPS=.*|HY2_UP_MBPS=|' private/.env
           test "$(base64 -d < private/out/laptop/v2ray | wc -l)" -eq 2
           base64 -d < private/out/laptop/v2ray | grep -Eq '^hysteria2://.*mport=20000-30000#node\.example\.com-laptop-hy2$'
-          SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
-            SSCTL_MIHOMO_BIN=/tmp/mihomo-bin SSCTL_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
-            ./ssctl reset laptop --qr hy2 >/dev/null
+          SINGTUN_ALLOW_NONROOT_SUB=true SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" \
+            SINGTUN_MIHOMO_BIN=/tmp/mihomo-bin SINGTUN_MIHOMO_WORKDIR=/tmp/mihomo-workdir \
+            ./singtun reset laptop --qr hy2 >/dev/null
           HY2_PASS_AFTER="$(jq -r '.outbounds[3].password' private/out/laptop/sing-box.json)"
           test "${HY2_PASS_AFTER}" != "${HY2_PASS_BEFORE}"
           sed -i 's|^HY2_HOP_PORTS=.*|HY2_HOP_PORTS=|' private/.env
@@ -673,17 +694,17 @@ jobs:
 
           # 6. 校验 ENABLE_SUBSCRIPTION=false 清空软链与发布目录、SINGBOX_CLIENT_COMPAT=1.12 兼容模式
           sed -i 's|^ENABLE_SUBSCRIPTION=.*|ENABLE_SUBSCRIPTION=false|' private/.env
-          ./ssctl check
-          SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./ssctl flush
+          ./singtun check
+          SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./singtun flush
           test ! -e "${SUB_WEB}/sub-web"
           test "$(find "${SUB_WEB}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 0
           ! grep -Eq '^update-url[[:space:]]*=' private/out/laptop/shadowrocket.conf
           sed -i 's|^ENABLE_SUBSCRIPTION=.*|ENABLE_SUBSCRIPTION=true|' private/.env
 
           sed -i 's|^SINGBOX_CLIENT_COMPAT=.*|SINGBOX_CLIENT_COMPAT=1.12|' private/.env
-          ./ssctl check
+          ./singtun check
           jq -e '(. | has("http_clients") | not) and .route.rule_set[0].download_detour == "proxy"' private/out/laptop/sing-box.json >/dev/null || {
-            ./ssctl flush --local-only
+            ./singtun flush --local-only
             jq -e '(. | has("http_clients") | not) and .route.rule_set[0].download_detour == "proxy"' private/out/laptop/sing-box.json >/dev/null
           }
           sed -i 's|^SINGBOX_CLIENT_COMPAT=.*|SINGBOX_CLIENT_COMPAT=1.14|' private/.env
@@ -691,22 +712,181 @@ jobs:
           # 7. 校验 del 删除与旧目录安全保护及 upgrade / uninstall 参数校验
           mkdir -p private/out/BAD_NAME
           touch private/out/keep.txt
-          SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./ssctl del sub-1
-          SSCTL_ALLOW_NONROOT_SUB=true SSCTL_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./ssctl del laptop
+          SINGTUN_ALLOW_NONROOT_SUB=true SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./singtun del sub-1
+          SINGTUN_ALLOW_NONROOT_SUB=true SINGTUN_SUB_WEB_BASE_OVERRIDE="${SUB_WEB}" ./singtun del laptop
           test ! -e private/out/sub-1
           test ! -e private/out/laptop
           test -d private/out/BAD_NAME
           test -f private/out/keep.txt
           rm -rf "${SUB_WEB}" private/out/BAD_NAME private/out/keep.txt
 
-          if ./ssctl upgrade not-a-version; then
+          if ./singtun upgrade not-a-version; then
             echo "ERROR: upgrade with invalid semver unexpectedly succeeded!" >&2
             exit 1
           fi
-          if ./ssctl uninstall --unknown-flag; then
+          if ./singtun uninstall --unknown-flag; then
             echo "ERROR: uninstall with unknown flag unexpectedly succeeded!" >&2
             exit 1
           fi
+
+      - name: Verify defaults backfill, ACME email derivation, singtun setup modes 1-3, and install.sh lifecycle
+        run: |
+          (
+            set -euo pipefail
+            TD="$(mktemp -d)"
+            trap 'rm -rf "${TD}"' EXIT
+
+            # 1. 极简 .env 经 singtun init 自动补齐全部默认项并一次通过 singtun check
+            P_MIN="${TD}/priv-min"
+            mkdir -p "${P_MIN}"
+            chmod 700 "${P_MIN}"
+            cat > "${P_MIN}/.env" <<'EOF'
+          SERVER_IP=198.51.100.20
+          SERVER_DOMAIN=node.ci-unit.org
+          CF_API_TOKEN=dummy_ci_token_for_validation
+          ACME_EMAIL=ops@ci-unit.org
+          EOF
+            chmod 600 "${P_MIN}/.env"
+            SINGTUN_PRIVATE_DIR="${P_MIN}" ./singtun init
+            grep -qE '^SINGBOX_VERSION=1\.14\.' "${P_MIN}/.env"
+            grep -qE '^VLESS_PORT=443$' "${P_MIN}/.env"
+            grep -qE '^DNS_DIRECT=223\.5\.5\.5$' "${P_MIN}/.env"
+            grep -qE '^DNS_REMOTE=1\.1\.1\.1$' "${P_MIN}/.env"
+            grep -qE '^RULESET_GEOSITE_CN=https://' "${P_MIN}/.env"
+            SINGTUN_PRIVATE_DIR="${P_MIN}" ./singtun check
+
+            # 2. common.sh derive_default_acme_email & @example.com 拦截验证
+            bash -c '
+              set -euo pipefail
+              source scripts/lib/common.sh
+              [[ "$(derive_default_acme_email "vpn.acme.org")" == "admin@acme.org" ]]
+              [[ "$(derive_default_acme_email "myhost.com")" == "admin@myhost.com" ]]
+              [[ "$(derive_default_acme_email "a.b.company.io")" == "admin@b.company.io" ]]
+              is_reserved_example_domain "node.example.com"
+              is_reserved_example_email "admin@example.com"
+              ! is_reserved_example_email "ops@acme.org"
+            '
+            P_EX="${TD}/priv-example-email"
+            SINGTUN_PRIVATE_DIR="${P_EX}" ./singtun init
+            SINGTUN_PRIVATE_DIR="${P_EX}" ./singtun help >/dev/null
+            SINGTUN_ENV_FILE="${P_EX}/.env" bash -c '
+              set -euo pipefail
+              source scripts/lib/common.sh
+              env_file_apply_batch "$SINGTUN_ENV_FILE" \
+                "SET:SERVER_IP=93.184.216.34" \
+                "SET:SERVER_DOMAIN=edge.ci-unit.org" \
+                "SET:ACME_EMAIL=admin@example.com" \
+                "SET:CF_API_TOKEN=dummy_ci_token_for_validation"
+            '
+            EX_ERR="$(SINGTUN_FORCE_PRODUCTION_CHECKS=true SKIP_OS_CHECK=true SKIP_DNS_CHECK=true SKIP_PORT_CHECK=true SINGTUN_PRIVATE_DIR="${P_EX}" bash scripts/00-preflight.sh 2>&1 || true)"
+            grep -Fq "ACME_EMAIL 不能使用保留示例邮箱" <<< "${EX_ERR}"
+
+            # 3. singtun setup --config-only 交互向导 3 档模式全流程验证
+            # Mode 1 (标准推荐，采用探测默认值)
+            P_M1="${TD}/priv-m1"
+            SINGTUN_PRIVATE_DIR="${P_M1}" \
+              SINGTUN_PUBLIC_IPV4_OVERRIDE="93.184.216.34" \
+              SINGTUN_SETUP_USE_STDIN="true" \
+              SINGTUN_SETUP_SKIP_DNS_CHECK="true" \
+              ./singtun setup --config-only <<'EOF'
+          gw1.ci-unit.org
+
+          ci_setup_tok_mode1
+
+          1
+          y
+          EOF
+            grep -qE '^SERVER_DOMAIN=gw1\.ci-unit\.org$' "${P_M1}/.env"
+            grep -qE '^SERVER_IP=93\.184\.216\.34$' "${P_M1}/.env"
+            grep -qE '^ACME_EMAIL=admin@ci-unit\.org$' "${P_M1}/.env"
+            grep -qE '^ENABLE_HY2=false$' "${P_M1}/.env"
+            SINGTUN_PRIVATE_DIR="${P_M1}" ./singtun check
+
+            # Mode 2 (标准 + Hysteria2 备用模式)
+            P_M2="${TD}/priv-m2"
+            SINGTUN_PRIVATE_DIR="${P_M2}" \
+              SINGTUN_PUBLIC_IPV4_OVERRIDE="93.184.216.34" \
+              SINGTUN_SETUP_USE_STDIN="true" \
+              SINGTUN_SETUP_SKIP_DNS_CHECK="true" \
+              ./singtun setup --config-only <<'EOF'
+          gw2.ci-unit.org
+
+          ci_setup_tok_mode2
+
+          2
+          9443
+          true
+          20000-20099
+          100
+          200
+          y
+          EOF
+            grep -qE '^ENABLE_HY2=true$' "${P_M2}/.env"
+            grep -qE '^HY2_PORT=9443$' "${P_M2}/.env"
+            grep -qE '^HY2_OBFS=true$' "${P_M2}/.env"
+            grep -qE '^HY2_HOP_PORTS=20000-20099$' "${P_M2}/.env"
+            SINGTUN_PRIVATE_DIR="${P_M2}" ./singtun check
+
+            # Mode 3 (高级自定义模式)
+            P_M3="${TD}/priv-m3"
+            SINGTUN_PRIVATE_DIR="${P_M3}" \
+              SINGTUN_PUBLIC_IPV4_OVERRIDE="93.184.216.34" \
+              SINGTUN_SETUP_USE_STDIN="true" \
+              SINGTUN_SETUP_SKIP_DNS_CHECK="true" \
+              ./singtun setup --config-only <<'EOF'
+          gw3.ci-unit.org
+
+          ci_setup_tok_mode3
+          custom@ci-unit.org
+          3
+
+          1.12
+          443
+          8443
+          false
+          fatal
+          false
+          223.6.6.6
+          8.8.8.8
+          false
+          y
+          EOF
+            grep -qE '^SINGBOX_CLIENT_COMPAT=1\.12$' "${P_M3}/.env"
+            grep -qE '^SERVER_LOG_LEVEL=fatal$' "${P_M3}/.env"
+            grep -qE '^ENABLE_SUBSCRIPTION=false$' "${P_M3}/.env"
+            grep -qE '^DNS_DIRECT=223\.6\.6\.6$' "${P_M3}/.env"
+            grep -qE '^DNS_REMOTE=8\.8\.8\.8$' "${P_M3}/.env"
+            SINGTUN_PRIVATE_DIR="${P_M3}" ./singtun check
+
+            # 4. install.sh --install-only / --update / 软链解析与 private/ 保留验证
+            BARE_REPO="${TD}/upstream.git"
+            WORK_CLONE="${TD}/work-clone"
+            git init --bare "${BARE_REPO}" >/dev/null
+            git clone "${PWD}" "${WORK_CLONE}" >/dev/null 2>&1
+            git -C "${WORK_CLONE}" config user.name "CI"
+            git -C "${WORK_CLONE}" config user.email "ci@example.invalid"
+            # 若工作区有未提交修改则快照提交至临时上游测试库
+            rsync -a --exclude='.git' --exclude='private' "${PWD}/" "${WORK_CLONE}/"
+            git -C "${WORK_CLONE}" add -A
+            git -C "${WORK_CLONE}" commit -q -m "ci snapshot" --allow-empty
+            HEAD_BRANCH="$(git -C "${WORK_CLONE}" rev-parse --abbrev-ref HEAD)"
+            git -C "${WORK_CLONE}" push -q "${BARE_REPO}" "${HEAD_BRANCH}:refs/heads/main"
+
+            INST_DIR="${TD}/opt-singtun"
+            BIN_DIR="${TD}/bin"
+            SINGTUN_INSTALL_ALLOW_NONROOT_TEST=true SKIP_OS_CHECK=true \
+              bash install.sh --install-only --repo "${BARE_REPO}" --ref main --dir "${INST_DIR}" --bin-dir "${BIN_DIR}"
+            test -L "${BIN_DIR}/singtun"
+            "${BIN_DIR}/singtun" init
+            sed -i 's|^CF_API_TOKEN=.*|CF_API_TOKEN=dummy_ci_token_for_validation|' "${INST_DIR}/private/.env"
+            printf 'KEEP_ME=1\n' > "${INST_DIR}/private/keep-sentinel"
+            "${BIN_DIR}/singtun" check
+
+            SINGTUN_INSTALL_ALLOW_NONROOT_TEST=true SKIP_OS_CHECK=true \
+              bash install.sh --update --repo "${BARE_REPO}" --ref main --dir "${INST_DIR}" --bin-dir "${BIN_DIR}"
+            test -f "${INST_DIR}/private/keep-sentinel"
+            "${BIN_DIR}/singtun" check
+          )
 
       - name: Verify audit invariants (REALITY keypair, non-public IP, SSH ports, nftables/UFW, leak edge cases)
         run: |
@@ -715,16 +895,16 @@ jobs:
             TD="$(mktemp -d)"
             trap 'rm -rf "${TD}"' EXIT
 
-            # (a) REALITY keypair 匹配校验与 ssctl init 保留私钥恢复公钥
+            # (a) REALITY keypair 匹配校验与 singtun init 保留私钥恢复公钥
             PDIR="${TD}/priv"
-            SSCTL_PRIVATE_DIR="${PDIR}" ./ssctl init
+            SINGTUN_PRIVATE_DIR="${PDIR}" ./singtun init
             sed -i 's|^CF_API_TOKEN=.*|CF_API_TOKEN=dummy_ci_token_for_validation|' "${PDIR}/.env"
             ORIG_PRIV="$(awk -F= '/^REALITY_PRIVATE_KEY=/ {print $2}' "${PDIR}/.env")"
             ORIG_PUB="$(awk -F= '/^REALITY_PUBLIC_KEY=/ {print $2}' "${PDIR}/.env")"
             test -n "${ORIG_PRIV}" && test -n "${ORIG_PUB}"
 
             sed -i 's|^REALITY_PUBLIC_KEY=.*|REALITY_PUBLIC_KEY=|' "${PDIR}/.env"
-            SSCTL_PRIVATE_DIR="${PDIR}" ./ssctl init
+            SINGTUN_PRIVATE_DIR="${PDIR}" ./singtun init
             REC_PRIV="$(awk -F= '/^REALITY_PRIVATE_KEY=/ {print $2}' "${PDIR}/.env")"
             REC_PUB="$(awk -F= '/^REALITY_PUBLIC_KEY=/ {print $2}' "${PDIR}/.env")"
             test "${REC_PRIV}" = "${ORIG_PRIV}"
@@ -733,12 +913,12 @@ jobs:
             ALT_PUB="$(sing-box generate reality-keypair | awk '/PublicKey/ {print $2}')"
             test "${ALT_PUB}" != "${ORIG_PUB}"
             sed -i "s|^REALITY_PUBLIC_KEY=.*|REALITY_PUBLIC_KEY=${ALT_PUB}|" "${PDIR}/.env"
-            if SSCTL_PRIVATE_DIR="${PDIR}" ./ssctl check 2>/dev/null; then
-              echo "ERROR: mismatched REALITY_PUBLIC_KEY unexpectedly passed ssctl check!" >&2
+            if SINGTUN_PRIVATE_DIR="${PDIR}" ./singtun check 2>/dev/null; then
+              echo "ERROR: mismatched REALITY_PUBLIC_KEY unexpectedly passed singtun check!" >&2
               exit 1
             fi
-            if SSCTL_PRIVATE_DIR="${PDIR}" ./ssctl flush --local-only 2>/dev/null; then
-              echo "ERROR: mismatched REALITY_PUBLIC_KEY unexpectedly passed ssctl flush --local-only!" >&2
+            if SINGTUN_PRIVATE_DIR="${PDIR}" ./singtun flush --local-only 2>/dev/null; then
+              echo "ERROR: mismatched REALITY_PUBLIC_KEY unexpectedly passed singtun flush --local-only!" >&2
               exit 1
             fi
             sed -i "s|^REALITY_PUBLIC_KEY=.*|REALITY_PUBLIC_KEY=${ORIG_PUB}|" "${PDIR}/.env"
@@ -746,24 +926,24 @@ jobs:
             # (b) 非公网 SERVER_IP 拒绝与 is_non_public_ipv4 单元测试
             for bad_ip in 10.0.0.5 127.0.0.1 100.64.0.1; do
               sed -i "s|^SERVER_IP=.*|SERVER_IP=${bad_ip}|" "${PDIR}/.env"
-              if SSCTL_PRIVATE_DIR="${PDIR}" ./ssctl check 2>/dev/null; then
-                echo "ERROR: non-public SERVER_IP=${bad_ip} unexpectedly passed ssctl check!" >&2
+              if SINGTUN_PRIVATE_DIR="${PDIR}" ./singtun check 2>/dev/null; then
+                echo "ERROR: non-public SERVER_IP=${bad_ip} unexpectedly passed singtun check!" >&2
                 exit 1
               fi
               BAD_SRV="${TD}/srv_${bad_ip}"
-              if SSCTL_PRIVATE_DIR="${PDIR}" bash scripts/40-deploy-server.sh --render-only "${BAD_SRV}" 2>/dev/null; then
+              if SINGTUN_PRIVATE_DIR="${PDIR}" bash scripts/40-deploy-server.sh --render-only "${BAD_SRV}" 2>/dev/null; then
                 echo "ERROR: non-public SERVER_IP=${bad_ip} unexpectedly passed 40-deploy-server.sh --render-only!" >&2
                 exit 1
               fi
-              if SSCTL_PRIVATE_DIR="${PDIR}" ./ssctl flush --local-only 2>/dev/null; then
-                echo "ERROR: non-public SERVER_IP=${bad_ip} unexpectedly passed ssctl flush --local-only!" >&2
+              if SINGTUN_PRIVATE_DIR="${PDIR}" ./singtun flush --local-only 2>/dev/null; then
+                echo "ERROR: non-public SERVER_IP=${bad_ip} unexpectedly passed singtun flush --local-only!" >&2
                 exit 1
               fi
             done
             sed -i 's|^SERVER_IP=.*|SERVER_IP=203.0.113.10|' "${PDIR}/.env"
 
             (
-              export SSCTL_PRIVATE_DIR="${PDIR}" SSCTL_ENV_FILE="${PDIR}/.env"
+              export SINGTUN_PRIVATE_DIR="${PDIR}" SINGTUN_ENV_FILE="${PDIR}/.env"
               source scripts/lib/common.sh
               is_non_public_ipv4 "203.0.113.10" true
               if is_non_public_ipv4 "203.0.113.10" false; then
@@ -823,7 +1003,7 @@ jobs:
             )"
             test "${PORTS_CASE2}" = "9022"
 
-            # (d) scripts/10-harden.sh 结构断言（vless_conn_* 仅用 flags dynamic 无 timeout + add，vless_rate_* 用 flags dynamic,timeout 1m + update，SYN drop 先于 ct count reject，# ssctl-preserve-ssh 清理）
+            # (d) scripts/10-harden.sh 结构断言（vless_conn_* 仅用 flags dynamic 无 timeout + add，vless_rate_* 用 flags dynamic,timeout 1m + update，SYN drop 先于 ct count reject，# singtun-preserve-ssh 清理）
             python3 - <<'PY'
           with open("scripts/10-harden.sh", encoding="utf-8") as f:
               txt = f.read()
@@ -857,7 +1037,7 @@ jobs:
           prune_start = txt.index("prune_stale_ufw_rules()")
           prune_end = txt.index("configure_ufw()", prune_start)
           prune = txt[prune_start:prune_end]
-          assert "ssctl-preserve-ssh" in prune and "ufw delete allow" in prune, "prune_stale_ufw_rules must clean stale # ssctl-preserve-ssh rules"
+          assert "singtun-preserve-ssh" in prune and "ufw delete allow" in prune, "prune_stale_ufw_rules must clean stale # singtun-preserve-ssh rules"
           PY
 
             # (e) check-private-leak.sh 行内注释引号值与无尾换行末行 Token 负向测试
@@ -873,7 +1053,7 @@ jobs:
             MSG_EDGE="${TD}/msg_edge.txt"
             for secret in "quoted_inline_secret_token_123" "${EOF_TOK}"; do
               printf 'leak edge secret %s\n' "${secret}" > "${MSG_EDGE}"
-              if SSCTL_PRIVATE_DIR="${LEAK_DIR}" SSCTL_ENV_FILE="${LEAK_DIR}/.env" \
+              if SINGTUN_PRIVATE_DIR="${LEAK_DIR}" SINGTUN_ENV_FILE="${LEAK_DIR}/.env" \
                 bash scripts/hooks/check-private-leak.sh --commit-msg "${MSG_EDGE}"; then
                 echo "ERROR: check-private-leak.sh failed to block edge secret (${secret})!" >&2
                 exit 1
@@ -893,7 +1073,7 @@ jobs:
 
           # 校验 private/www 软链穿越拦截（00-preflight 与 40-deploy-server 双重拒绝）
           ln -s /etc/hosts private/www/evil-link
-          if ./ssctl check 2>/dev/null; then
+          if ./singtun check 2>/dev/null; then
             echo "ERROR: symlink inside private/www unexpectedly passed preflight!" >&2
             exit 1
           fi
@@ -1055,13 +1235,13 @@ jobs:
                   pub = [l.split(":", 1)[1].strip() for l in kp.splitlines() if "PublicKey" in l][0]
                   env = os.environ.copy()
                   env.update({
-                      "SSCTL_PRIVATE_DIR": pdir,
-                      "SSCTL_ENV_FILE": ef,
-                      "SSCTL_SELF_IPV6_OVERRIDE": "2001:db8::10",
+                      "SINGTUN_PRIVATE_DIR": pdir,
+                      "SINGTUN_ENV_FILE": ef,
+                      "SINGTUN_SELF_IPV6_OVERRIDE": "2001:db8::10",
                   })
                   subprocess.check_call([
                       "bash", "-c",
-                      'source scripts/lib/common.sh && env_file_apply_batch "$SSCTL_ENV_FILE" '
+                      'source scripts/lib/common.sh && env_file_apply_batch "$SINGTUN_ENV_FILE" '
                       f'"SET:SERVER_IPV6={"true" if ipv6_enabled else "false"}" '
                       f'"SET:REALITY_PRIVATE_KEY={pk}" "SET:REALITY_PUBLIC_KEY={pub}" '
                       '"SET:REALITY_SHORT_ID=0123456789abcdef" "SET:SUB_PATH_PREFIX=p0123456789abcde"'
@@ -1291,15 +1471,15 @@ jobs:
                   srv_dir = os.path.join(tmp, "srv")
                   env = os.environ.copy()
                   env.update({
-                      "SSCTL_PRIVATE_DIR": priv_dir,
-                      "SSCTL_ENV_FILE": env_path,
-                      "SSCTL_CERT_DIR_OVERRIDE": cert_dir,
-                      "SSCTL_WEB_ROOT_OVERRIDE": f"{srv_dir}/www",
-                      "SSCTL_NGINX_REJECT_UNKNOWN_SNI": reject_mode,
+                      "SINGTUN_PRIVATE_DIR": priv_dir,
+                      "SINGTUN_ENV_FILE": env_path,
+                      "SINGTUN_CERT_DIR_OVERRIDE": cert_dir,
+                      "SINGTUN_WEB_ROOT_OVERRIDE": f"{srv_dir}/www",
+                      "SINGTUN_NGINX_REJECT_UNKNOWN_SNI": reject_mode,
                   })
                   subprocess.check_call([
                       "bash", "-c",
-                      'source scripts/lib/common.sh && env_file_apply_batch "$SSCTL_ENV_FILE" '
+                      'source scripts/lib/common.sh && env_file_apply_batch "$SINGTUN_ENV_FILE" '
                       f'"SET:VLESS_PORT={vless_port}" "SET:REALITY_HANDSHAKE_PORT={hs_port}" '
                       f'"SET:REALITY_PRIVATE_KEY={priv_key}" "SET:REALITY_PUBLIC_KEY={pub_key}" '
                       '"SET:REALITY_SHORT_ID=0123456789abcdef" "SET:SUB_PATH_PREFIX=p0123456789abcde" '
@@ -1320,10 +1500,10 @@ jobs:
                   with open(f"{srv_dir}/nginx/site.conf") as f:
                       site_conf = f.read()
                   site_conf = (site_conf
-                      .replace("/etc/ssctl/cert/fullchain.pem", f"{cert_dir}/fullchain.pem")
-                      .replace("/etc/ssctl/cert/key.pem", f"{cert_dir}/key.pem")
-                      .replace("/var/www/ssctl-site", f"{srv_dir}/www")
-                      .replace("/var/lib/ssctl/sub-web", f"{srv_dir}/sub-web"))
+                      .replace("/etc/singtun/cert/fullchain.pem", f"{cert_dir}/fullchain.pem")
+                      .replace("/etc/singtun/cert/key.pem", f"{cert_dir}/key.pem")
+                      .replace("/var/www/singtun-site", f"{srv_dir}/www")
+                      .replace("/var/lib/singtun/sub-web", f"{srv_dir}/sub-web"))
                   with open(f"{srv_dir}/nginx/site-run.conf", "w") as f:
                       f.write(site_conf)
                   with open(f"{srv_dir}/nginx.conf", "w") as f:

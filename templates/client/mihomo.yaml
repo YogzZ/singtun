@@ -1,4 +1,4 @@
-# mihomo (Clash.Meta) 远程订阅配置 (由 ssctl 50-gen-clients.sh 生成)
+# mihomo (Clash.Meta) 远程订阅配置 (由 singtun 50-gen-clients.sh 生成)
 # 策略：绕过中国大陆与私有网络，海外域名经代理远端 DoH 解析防泄漏，拒绝非大陆 UDP 443 (QUIC)
 
 mixed-port: 7890
@@ -64,9 +64,12 @@ dns:
     - "time.*.com"
     - "time.*.gov"
     - "time.*.edu.cn"
+    - "+.time.apple.com"
     - "time.*.apple.com"
     - "ntp.*.com"
+    - "ntp.*.gov"
     - "+.pool.ntp.org"
+    - "+.ntp.org"
     - "__SERVER_DOMAIN__"
 __MIHOMO_FAKE_IP_FILTER_CANARIES__
   default-nameserver:
@@ -135,14 +138,16 @@ rules:
 __MIHOMO_SELF_IP_DIRECT_RULES__
   # 2. 服务端无 IPv6 时拒绝公网 IPv6 流量防止绕过
   __MIHOMO_IPV6_RULE__
-  # 3. 阻断 Apple iCloud 专用代理（Private Relay）金丝雀与控制面域名，防 MASQUE UDP 443 死锁或改变出口 IP
+  # 3. NTP 校时协议 (UDP 123) 本地直连（无隐私敏感载荷，避免非 XUDP 客户端落入 VLESS Vision 触发 flow mismatch 及跨境 RTT 偏差）
+  - AND,((NETWORK,UDP),(DST-PORT,123)),DIRECT
+  # 4. 阻断 Apple iCloud 专用代理（Private Relay）金丝雀与控制面域名，防 MASQUE UDP 443 死锁或改变出口 IP
 __MIHOMO_PRIVATE_RELAY_RULES__
-  # 4. 前置 Google / .google / Firebase 核心后缀走代理（先拦截 UDP 443 抑制 QUIC，防止命中上游 @cn 历史规则直连超时）
+  # 5. 前置 Google / .google / Firebase 核心后缀走代理（先拦截 UDP 443 抑制 QUIC，防止命中上游 @cn 历史规则直连超时）
 __MIHOMO_OVERSEAS_PRIORITY_RULES__
-  # 5. 中国大陆域名与 IP 直连
+  # 6. 中国大陆域名与 IP 直连
   - RULE-SET,geosite-cn,DIRECT
   - RULE-SET,geoip-cn,DIRECT,no-resolve
-  # 6. 拒绝海外 QUIC (UDP 443)，迫使回退至 TCP 以发挥 Vision 消除特征
+  # 7. 拒绝海外 QUIC (UDP 443)，迫使回退至 TCP 以发挥 Vision 消除特征
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
-  # 7. 其余全部走固定出口代理
+  # 8. 其余全部走固定出口代理
   - MATCH,PROXY

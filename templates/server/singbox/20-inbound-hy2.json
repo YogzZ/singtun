@@ -8,15 +8,15 @@
       "users": [],
       "masquerade": {
         "type": "file",
-        "directory": "/var/www/ssctl-site"
+        "directory": "/var/www/singtun-site"
       },
       "tls": {
         "enabled": true,
         "alpn": [
           "h3"
         ],
-        "certificate_path": "/etc/ssctl/cert/fullchain.pem",
-        "key_path": "/etc/ssctl/cert/key.pem"
+        "certificate_path": "/etc/singtun/cert/fullchain.pem",
+        "key_path": "/etc/singtun/cert/key.pem"
       }
     }
   ]
