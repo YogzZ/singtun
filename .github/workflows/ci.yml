@@ -862,15 +862,14 @@ jobs:
             BARE_REPO="${TD}/upstream.git"
             WORK_CLONE="${TD}/work-clone"
             git init --bare "${BARE_REPO}" >/dev/null
-            git clone "${PWD}" "${WORK_CLONE}" >/dev/null 2>&1
+            git init -q "${WORK_CLONE}"
             git -C "${WORK_CLONE}" config user.name "CI"
             git -C "${WORK_CLONE}" config user.email "ci@example.invalid"
-            # 若工作区有未提交修改则快照提交至临时上游测试库
+            # 创建非浅层快照仓库，避免 actions/checkout shallow clone 触发 shallow update not allowed
             rsync -a --exclude='.git' --exclude='private' "${PWD}/" "${WORK_CLONE}/"
             git -C "${WORK_CLONE}" add -A
-            git -C "${WORK_CLONE}" commit -q -m "ci snapshot" --allow-empty
-            HEAD_BRANCH="$(git -C "${WORK_CLONE}" rev-parse --abbrev-ref HEAD)"
-            git -C "${WORK_CLONE}" push -q "${BARE_REPO}" "${HEAD_BRANCH}:refs/heads/main"
+            git -C "${WORK_CLONE}" commit -q -m "ci snapshot"
+            git -C "${WORK_CLONE}" push -q "${BARE_REPO}" HEAD:refs/heads/main
 
             INST_DIR="${TD}/opt-singtun"
             BIN_DIR="${TD}/bin"
